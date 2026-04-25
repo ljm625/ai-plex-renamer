@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from .debug import DebugLogger, debug_event
+from .http_client import proxy_debug_info, urlopen_with_environment_proxy
 from .models import MediaGuess
 
 
@@ -179,6 +180,7 @@ class NvidiaAIClassifier:
             "headers": headers,
             "payload": payload,
             "timeout": self.timeout,
+            "proxies": proxy_debug_info(),
         }
         if extra_debug:
             debug_data.update(extra_debug)
@@ -474,7 +476,7 @@ def _urlopen_json(
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urlopen_with_environment_proxy(request, timeout=timeout) as response:
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")

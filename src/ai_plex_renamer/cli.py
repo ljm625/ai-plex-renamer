@@ -43,6 +43,9 @@ def main(argv: list[str] | None = None) -> int:
             include_adult=args.tmdb_include_adult,
             timeout=args.tmdb_timeout,
             debug=debug,
+            cache_path=Path(args.tmdb_cache).expanduser() if args.tmdb_cache else None,
+            cache_enabled=not args.no_tmdb_cache,
+            cache_ttl_seconds=_cache_ttl_seconds(args.tmdb_cache_ttl_days),
         )
 
     files = list(iter_media_files(root, recursive=args.recursive, include_hidden=args.include_hidden))
@@ -138,6 +141,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="TMDB request timeout in seconds. Default: 20.",
+    )
+    parser.add_argument(
+        "--tmdb-cache",
+        default=None,
+        help="TMDB cache file path. Defaults to the system user cache directory.",
+    )
+    parser.add_argument(
+        "--no-tmdb-cache",
+        action="store_true",
+        help="Disable the persistent TMDB response cache.",
+    )
+    parser.add_argument(
+        "--tmdb-cache-ttl-days",
+        type=float,
+        default=30.0,
+        help="Days before cached TMDB responses expire. Use 0 for no expiry. Default: 30.",
     )
     parser.add_argument(
         "--nvidia-api-key",
@@ -264,6 +283,12 @@ def print_summary(plans: Iterable[RenamePlan], applied: bool) -> None:
     print(f"\nSummary ({mode}): total={total}, {parts}")
     if not applied:
         print("Run again with --apply to rename the planned files.")
+
+
+def _cache_ttl_seconds(days: float) -> Optional[int]:
+    if days <= 0:
+        return None
+    return int(days * 24 * 60 * 60)
 
 
 if __name__ == "__main__":

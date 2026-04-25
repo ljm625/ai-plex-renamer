@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -10,10 +13,13 @@ from dataclasses import replace
 from typing import Any, Callable, Mapping, Optional
 
 from .debug import DebugLogger, debug_event
+from .http_client import proxy_debug_info, urlopen_with_environment_proxy
 from .models import MediaGuess
 
 
 TMDBTransport = Callable[[str, Mapping[str, str], int], Mapping[str, Any]]
+DEFAULT_TMDB_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+TMDB_CACHE_VERSION = 1
 
 
 class TMDBClient:
@@ -28,6 +34,8 @@ class TMDBClient:
         base_url: str = "https://api.themoviedb.org/3",
         transport: Optional[TMDBTransport] = None,
         debug: Optional[DebugLogger] = None,
+        cache_path: Optional[Path] = None,
+        cache_ttl_seconds: Optional[int] = DEFAULT_TMDB_CACHE_TTL_SECONDS,
     ) -> None:
         self.bearer_token = bearer_token
         self.api_key = api_key
@@ -38,7 +46,11 @@ class TMDBClient:
         self.base_url = base_url.rstrip("/")
         self._transport = transport or _urlopen_json
         self._debug = debug
-        self._cache: dict[tuple[str, tuple[tuple[str, Any], ...]], Mapping[str, Any]] = {}
+        self.cache_path = Path(cache_path).expanduser() if cache_path is not None else None
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._cache: dict[str, Mapping[str, Any]] = {}
+        self._disk_cache: dict[str, Any] = {}
+        self._disk_cache_loaded = False
 
     @classmethod
     def from_environment(
@@ -50,12 +62,19 @@ class TMDBClient:
         include_adult: bool = False,
         timeout: int = 20,
         debug: Optional[DebugLogger] = None,
+        cache_path: Optional[Path] = None,
+        cache_enabled: bool = True,
+        cache_ttl_seconds: Optional[int] = DEFAULT_TMDB_CACHE_TTL_SECONDS,
     ) -> Optional["TMDBClient"]:
         token = bearer_token or os.getenv("TMDB_BEARER_TOKEN")
         key = api_key or os.getenv("TMDB_API_KEY")
         if not token and not key:
             debug_event(debug, "tmdb disabled", {"reason": "No TMDB_BEARER_TOKEN or TMDB_API_KEY configured."})
             return None
+        resolved_cache_path = None
+        if cache_enabled:
+            env_cache_path = os.getenv("TMDB_CACHE_PATH")
+            resolved_cache_path = cache_path or (Path(env_cache_path) if env_cache_path else _default_cache_path())
         return cls(
             bearer_token=token,
             api_key=key,
@@ -64,6 +83,8 @@ class TMDBClient:
             include_adult=include_adult,
             timeout=timeout,
             debug=debug,
+            cache_path=resolved_cache_path,
+            cache_ttl_seconds=cache_ttl_seconds,
         )
 
     def enrich(self, guess: MediaGuess) -> MediaGuess:
@@ -185,18 +206,34 @@ class TMDBClient:
         if self.api_key:
             clean_params.setdefault("api_key", self.api_key)
 
-        cache_key = (endpoint, tuple(sorted(clean_params.items())))
+        cache_key = _request_cache_key(endpoint, clean_params)
         if cache_key in self._cache:
             debug_event(
                 self._debug,
                 "tmdb cache hit",
                 {
+                    "source": "memory",
                     "endpoint": endpoint,
                     "params": clean_params,
                     "response": self._cache[cache_key],
                 },
             )
             return self._cache[cache_key]
+
+        cached_data = self._read_disk_cache(cache_key)
+        if cached_data is not None:
+            self._cache[cache_key] = cached_data
+            debug_event(
+                self._debug,
+                "tmdb cache hit",
+                {
+                    "source": "disk",
+                    "endpoint": endpoint,
+                    "params": clean_params,
+                    "response": cached_data,
+                },
+            )
+            return cached_data
 
         url = f"{self.base_url}{endpoint}?{urllib.parse.urlencode(clean_params)}"
         headers = {"accept": "application/json"}
@@ -212,18 +249,92 @@ class TMDBClient:
                 "params": clean_params,
                 "headers": headers,
                 "timeout": self.timeout,
+                "proxies": proxy_debug_info(),
             },
         )
         data = self._transport(url, headers, self.timeout)
         debug_event(self._debug, "tmdb response", {"endpoint": endpoint, "response": data})
         self._cache[cache_key] = data
+        self._write_disk_cache(cache_key, data)
         return data
+
+    def _read_disk_cache(self, cache_key: str) -> Optional[Mapping[str, Any]]:
+        self._load_disk_cache()
+        entry = self._disk_cache.get(cache_key)
+        if not isinstance(entry, Mapping):
+            return None
+        created_at = entry.get("created_at")
+        if self._is_cache_entry_expired(created_at):
+            return None
+        response = entry.get("response")
+        return response if isinstance(response, Mapping) else None
+
+    def _write_disk_cache(self, cache_key: str, data: Mapping[str, Any]) -> None:
+        if self.cache_path is None:
+            return
+        self._load_disk_cache()
+        now = int(time.time())
+        self._disk_cache[cache_key] = {
+            "created_at": now,
+            "response": data,
+        }
+        self._prune_expired_disk_cache(now)
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": TMDB_CACHE_VERSION,
+                "entries": self._disk_cache,
+            }
+            temp_path = self.cache_path.with_name(f"{self.cache_path.name}.tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.replace(self.cache_path)
+        except OSError as exc:
+            debug_event(self._debug, "tmdb cache write failed", {"path": self.cache_path, "error": str(exc)})
+
+    def _load_disk_cache(self) -> None:
+        if self._disk_cache_loaded:
+            return
+        self._disk_cache_loaded = True
+        if self.cache_path is None:
+            return
+        try:
+            payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            debug_event(self._debug, "tmdb cache read failed", {"path": self.cache_path, "error": str(exc)})
+            return
+        if not isinstance(payload, Mapping) or payload.get("version") != TMDB_CACHE_VERSION:
+            return
+        entries = payload.get("entries")
+        if isinstance(entries, Mapping):
+            self._disk_cache = dict(entries)
+
+    def _is_cache_entry_expired(self, created_at: Any) -> bool:
+        if self.cache_ttl_seconds is None:
+            return False
+        if not isinstance(created_at, (int, float)):
+            return True
+        return time.time() - float(created_at) > self.cache_ttl_seconds
+
+    def _prune_expired_disk_cache(self, now: int) -> None:
+        if self.cache_ttl_seconds is None:
+            return
+        expired_keys = [
+            key
+            for key, entry in self._disk_cache.items()
+            if not isinstance(entry, Mapping)
+            or not isinstance(entry.get("created_at"), (int, float))
+            or now - float(entry["created_at"]) > self.cache_ttl_seconds
+        ]
+        for key in expired_keys:
+            self._disk_cache.pop(key, None)
 
 
 def _urlopen_json(url: str, headers: Mapping[str, str], timeout: int) -> Mapping[str, Any]:
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urlopen_with_environment_proxy(request, timeout=timeout) as response:
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code}") from exc
@@ -265,6 +376,29 @@ def _normalize_param(value: Any) -> Any:
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
     return value
+
+
+def _request_cache_key(endpoint: str, params: Mapping[str, Any]) -> str:
+    cache_params = {
+        key: value
+        for key, value in params.items()
+        if key.lower() != "api_key"
+    }
+    payload = {
+        "endpoint": endpoint,
+        "params": sorted(cache_params.items()),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _default_cache_path() -> Path:
+    if os.name == "nt":
+        base = Path(os.getenv("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    else:
+        base = Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return base / "ai-plex-renamer" / "tmdb-cache.json"
 
 
 def _bool_param(value: bool) -> str:

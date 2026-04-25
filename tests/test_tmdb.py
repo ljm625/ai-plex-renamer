@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -92,6 +93,47 @@ class TMDBClientTests(unittest.TestCase):
         self.assertEqual(guess.year, 2010)
         self.assertIn("TMDB lookup failed: boom", guess.reason)
 
+    def test_repeated_tmdb_request_uses_memory_cache(self):
+        calls = []
+
+        def transport(url, headers, timeout):
+            calls.append(url)
+            return _movie_response()
+
+        client = TMDBClient(api_key="key", transport=transport)
+
+        first = client.enrich(MediaGuess(media_type="movie", title="Inception", confidence=0.8))
+        second = client.enrich(MediaGuess(media_type="movie", title="Inception", confidence=0.8))
+
+        self.assertEqual(first.year, 2010)
+        self.assertEqual(second.year, 2010)
+        self.assertEqual(len(calls), 1)
+
+    def test_tmdb_disk_cache_is_reused_without_storing_api_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "tmdb-cache.json"
+            calls = []
+
+            def transport(url, headers, timeout):
+                calls.append(url)
+                return _movie_response()
+
+            first_client = TMDBClient(api_key="first-key", transport=transport, cache_path=cache_path)
+            first = first_client.enrich(MediaGuess(media_type="movie", title="Inception", confidence=0.8))
+
+            def failing_transport(url, headers, timeout):
+                raise AssertionError("TMDB transport should not be called when disk cache matches.")
+
+            second_client = TMDBClient(api_key="second-key", transport=failing_transport, cache_path=cache_path)
+            second = second_client.enrich(MediaGuess(media_type="movie", title="Inception", confidence=0.8))
+
+            self.assertEqual(first.year, 2010)
+            self.assertEqual(second.year, 2010)
+            self.assertEqual(len(calls), 1)
+            cache_text = cache_path.read_text(encoding="utf-8")
+            self.assertNotIn("first-key", cache_text)
+            self.assertNotIn("second-key", cache_text)
+
 
 class TMDBRenameTests(unittest.TestCase):
     def test_tmdb_year_is_used_in_movie_filename(self):
@@ -142,6 +184,10 @@ class TMDBRenameTests(unittest.TestCase):
 def _transport_for_movie(url, headers, timeout):
     assert headers["Authorization"] == "Bearer token"
     assert "search/movie" in url
+    return _movie_response()
+
+
+def _movie_response():
     return {
         "results": [
             {

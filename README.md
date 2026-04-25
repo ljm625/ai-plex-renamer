@@ -52,6 +52,13 @@ ai-plex-renamer "/path/to/media"
 ai-plex-renamer "/path/to/media" --no-tmdb
 ```
 
+TMDB 查询默认会缓存到系统用户缓存目录，避免重复 dry run 时反复请求同一个标题。可以指定缓存文件或关闭缓存：
+
+```bash
+ai-plex-renamer "/path/to/media" --tmdb-cache "/path/to/tmdb-cache.json"
+ai-plex-renamer "/path/to/media" --no-tmdb-cache
+```
+
 TMDB 署名说明：This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 启用 NVIDIA AI 兜底：
@@ -95,6 +102,7 @@ ai-plex-renamer "/path/to/media" \
   --type auto \
   --tmdb-language en-US \
   --tmdb-include-adult \
+  --tmdb-cache-ttl-days 30 \
   --nvidia-model meta/llama-3.1-8b-instruct \
   --collision skip \
   --apply
@@ -113,6 +121,13 @@ ai-plex-renamer "/path/to/media" --verbose
 ```
 
 `--verbose` 会把分组、本地解析、TMDB 请求/响应、NVIDIA 请求/响应打印到 stderr；`Authorization`、`api_key` 等敏感信息会自动脱敏。
+
+TMDB 和 NVIDIA 请求会读取系统环境变量里的 `http_proxy`、`https_proxy`、`no_proxy`。例如：
+
+```bash
+export https_proxy="http://127.0.0.1:7890"
+export http_proxy="http://127.0.0.1:7890"
+```
 
 默认情况下，如果在扫描根目录直接发现 TV 剧集文件，会自动计划移动到剧集文件夹：
 
