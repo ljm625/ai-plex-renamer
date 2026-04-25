@@ -46,6 +46,13 @@ def build_plex_filename(guess: MediaGuess, original_extension: str) -> str:
     raise ValueError("Cannot build a Plex name for an unknown media type.")
 
 
+def build_plex_folder_name(guess: MediaGuess) -> str:
+    title = sanitize_component(guess.title, fallback="Unknown")
+    if guess.year and not title.endswith(f"({guess.year})"):
+        return f"{title} ({guess.year})"
+    return title
+
+
 def resolve_collision(target: Path, source: Path, strategy: str) -> Path:
     if target == source or not target.exists():
         return target

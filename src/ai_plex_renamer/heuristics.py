@@ -41,6 +41,7 @@ FOLDER_EPISODE_PATTERNS = [
     (re.compile(r"(?i)(?:後編|后編|後篇|后篇|下巻|下集|下篇|part[\s._-]*2|pt[\s._-]*2)"), 2, "後編"),
 ]
 HASH_EPISODE_PATTERN = re.compile(r"(?i)(?:[#＃]\s*|(?:episode|ep)\s*\.?\s*)(?P<episode>\d{1,3})")
+BRACKET_EPISODE_PATTERN = re.compile(r"(?i)[\[【(]\s*(?P<episode>\d{1,3})\s*[\]】)]")
 NUMBERED_EPISODE_PATTERN = re.compile(r"(?i)(?:第\s*)?(?P<episode>\d{1,3})\s*(?:話|话|集|回)")
 FOLDER_TITLE_PREFIX_PATTERN = re.compile(r"(?i)^(?:ova|oav|oad|tv|series|movie)\s+")
 LANGUAGE_TAGS = {
@@ -161,7 +162,9 @@ def _guess_folder_episode(stem: str, parent: str) -> MediaGuess:
     if not cleaned_stem:
         return MediaGuess.unknown("No filename text found.")
 
-    episode = _episode_number_from_marker(cleaned_stem)
+    episode = _episode_number_from_marker(stem)
+    if episode is None:
+        episode = _episode_number_from_marker(cleaned_stem)
     episode_title = None
     if episode is None:
         for pattern, candidate_episode, candidate_title in FOLDER_EPISODE_PATTERNS:
@@ -193,7 +196,7 @@ def clean_folder_title(value: str) -> str:
 
 
 def _episode_number_from_marker(value: str) -> Optional[int]:
-    for pattern in (HASH_EPISODE_PATTERN, NUMBERED_EPISODE_PATTERN):
+    for pattern in (HASH_EPISODE_PATTERN, BRACKET_EPISODE_PATTERN, NUMBERED_EPISODE_PATTERN):
         match = pattern.search(value)
         if not match:
             continue

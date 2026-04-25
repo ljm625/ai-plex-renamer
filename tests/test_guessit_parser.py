@@ -1,10 +1,11 @@
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from ai_plex_renamer.guessit_parser import media_guess_from_guessit
 from ai_plex_renamer.models import MediaGuess
-from ai_plex_renamer.renamer import build_plans, make_rename_plan
+from ai_plex_renamer.renamer import apply_plan, build_plans, make_rename_plan
 
 
 class GuessItParserTests(unittest.TestCase):
@@ -141,6 +142,99 @@ class RenamePriorityTests(unittest.TestCase):
 
         self.assertEqual(plans[0].target.name, "初恋時間。 - S01E01.mkv")
         self.assertEqual(plans[1].target.name, "初恋時間。 - S01E02.mp4")
+
+    def test_bracketed_release_numbers_are_episode_planned_without_ai(self):
+        files = [
+            Path("/tmp/Overflow/[Sakurato.sub][Overflow][01][GB][HEVC-10Bit][1080P].mp4"),
+            Path("/tmp/Overflow/[Sakurato.sub][Overflow][02][GB][HEVC-10Bit][1080P].mp4"),
+        ]
+
+        plans = build_plans(files, Path("/tmp/Hentai2"), classifier=None, tmdb_client=None, library_hint="auto", collision="skip")
+
+        self.assertEqual(plans[0].target.name, "Overflow - S01E01.mp4")
+        self.assertEqual(plans[1].target.name, "Overflow - S01E02.mp4")
+
+    def test_root_tv_episode_moves_into_show_folder(self):
+        source = Path("/tmp/Library/Treme.1x03.Right.Place.Wrong.Time.mkv")
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess(
+                media_type="tv",
+                title="Treme",
+                season=1,
+                episode=3,
+                episode_title="Right Place Wrong Time",
+                confidence=0.85,
+                reason="Parsed by GuessIt.",
+            ),
+        ):
+            plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None)
+
+        self.assertEqual(plan.target, Path("/tmp/Library/Treme/Treme - S01E03 - Right Place Wrong Time.mkv"))
+
+    def test_show_directory_tv_episode_does_not_nest_show_folder(self):
+        source = Path("/tmp/Library/Treme/Treme.1x03.Right.Place.Wrong.Time.mkv")
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess(
+                media_type="tv",
+                title="Treme",
+                season=1,
+                episode=3,
+                episode_title="Right Place Wrong Time",
+                confidence=0.85,
+                reason="Parsed by GuessIt.",
+            ),
+        ):
+            plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None)
+
+        self.assertEqual(plan.target, Path("/tmp/Library/Treme/Treme - S01E03 - Right Place Wrong Time.mkv"))
+
+    def test_scan_show_directory_does_not_nest_show_folder(self):
+        source = Path("/tmp/Library/Treme/Treme.1x03.Right.Place.Wrong.Time.mkv")
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess(
+                media_type="tv",
+                title="Treme",
+                season=1,
+                episode=3,
+                episode_title="Right Place Wrong Time",
+                confidence=0.85,
+                reason="Parsed by GuessIt.",
+            ),
+        ):
+            plan = make_rename_plan(source, Path("/tmp/Library/Treme"), classifier=None)
+
+        self.assertEqual(plan.target, Path("/tmp/Library/Treme/Treme - S01E03 - Right Place Wrong Time.mkv"))
+
+    def test_apply_plan_creates_root_show_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Treme.1x03.Right.Place.Wrong.Time.mkv"
+            source.touch()
+
+            with patch(
+                "ai_plex_renamer.renamer.guess_with_guessit",
+                return_value=MediaGuess(
+                    media_type="tv",
+                    title="Treme",
+                    season=1,
+                    episode=3,
+                    episode_title="Right Place Wrong Time",
+                    confidence=0.85,
+                    reason="Parsed by GuessIt.",
+                ),
+            ):
+                plan = make_rename_plan(source, root, classifier=None)
+
+            applied = apply_plan(plan)
+
+            self.assertEqual(applied.status, "renamed")
+            self.assertTrue((root / "Treme" / "Treme - S01E03 - Right Place Wrong Time.mkv").exists())
 
     def test_sxxexx_language_suffix_does_not_search_as_title(self):
         source = Path("/tmp/Hentai2/聖痕のアリア/S01E01.chs.mp4")

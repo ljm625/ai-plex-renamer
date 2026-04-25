@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         tmdb_client=tmdb_client,
         library_hint=args.type,
         collision=args.collision,
+        organize_root_tv=args.organize_root_tv,
         debug=debug,
     )
 
@@ -180,6 +181,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="What to do when the target filename already exists. Default: skip.",
     )
     parser.add_argument(
+        "--organize-root-tv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Move TV episodes found directly in the scan root into a show folder. Default: true.",
+    )
+    parser.add_argument(
         "--recursive",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -234,8 +241,9 @@ class LazyNvidiaAIClassifier:
 def format_plan(plan: RenamePlan, apply: bool) -> str:
     if plan.status in {"planned", "renamed", "unchanged"} and plan.target:
         verb = "RENAMED" if plan.status == "renamed" else "DRY" if not apply else plan.status.upper()
+        target_display = plan.target.name if plan.target.parent == plan.source.parent else str(plan.target)
         return (
-            f"  {verb}: {plan.source.name} -> {plan.target.name}\n"
+            f"  {verb}: {plan.source.name} -> {target_display}\n"
             f"  guess: {plan.guess.media_type}, confidence={plan.guess.confidence:.2f}, "
             f"reason={plan.guess.reason}"
         )

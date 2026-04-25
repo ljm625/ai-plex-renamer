@@ -50,6 +50,17 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(guess.episode, 2)
         self.assertIsNone(guess.episode_title)
 
+    def test_guess_folder_episode_with_bracketed_release_number(self):
+        guess = guess_from_filename(
+            Path("/tmp/Overflow/[Sakurato.sub][Overflow][01][GB][HEVC-10Bit][1080P].mp4")
+        )
+
+        self.assertEqual(guess.media_type, "tv")
+        self.assertEqual(guess.title, "Overflow")
+        self.assertEqual(guess.season, 1)
+        self.assertEqual(guess.episode, 1)
+        self.assertIsNone(guess.episode_title)
+
     def test_sxxexx_without_title_uses_parent_folder(self):
         guess = guess_from_filename(Path("/tmp/LouisTheCat/S1E03.mp4"))
 

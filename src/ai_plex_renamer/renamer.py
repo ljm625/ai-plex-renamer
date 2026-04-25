@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import re
 from typing import Iterable, Iterator, Optional
 
 from .ai import NvidiaAIClassifier
 from .debug import DebugLogger, debug_event
 from .guessit_parser import guess_with_guessit
-from .heuristics import guess_folder_episode_from_path, guess_from_filename
+from .heuristics import clean_folder_title, guess_folder_episode_from_path, guess_from_filename
 from .models import MediaGuess, RenamePlan
-from .naming import build_plex_filename, is_video_file, resolve_collision
+from .naming import build_plex_filename, build_plex_folder_name, is_video_file, resolve_collision
 from .tmdb import TMDBClient
 
 
@@ -34,6 +35,7 @@ def make_rename_plan(
     tmdb_client: Optional[TMDBClient] = None,
     library_hint: str = "auto",
     collision: str = "skip",
+    organize_root_tv: bool = True,
     debug: Optional[DebugLogger] = None,
 ) -> RenamePlan:
     return _make_plans_for_group(
@@ -43,11 +45,18 @@ def make_rename_plan(
         tmdb_client=tmdb_client,
         library_hint=library_hint,
         collision=collision,
+        organize_root_tv=organize_root_tv,
         debug=debug,
     )[0]
 
 
-def _plan_from_guess(source: Path, guess: MediaGuess, collision: str) -> RenamePlan:
+def _plan_from_guess(
+    source: Path,
+    root: Path,
+    guess: MediaGuess,
+    collision: str,
+    organize_root_tv: bool,
+) -> RenamePlan:
     if not guess.is_usable():
         return RenamePlan(
             source=source,
@@ -59,7 +68,8 @@ def _plan_from_guess(source: Path, guess: MediaGuess, collision: str) -> RenameP
 
     try:
         new_name = build_plex_filename(guess, source.suffix)
-        target = resolve_collision(source.with_name(new_name), source, collision)
+        target_dir = _target_directory(source, root, guess, organize_root_tv)
+        target = resolve_collision(target_dir / new_name, source, collision)
     except Exception as exc:
         return RenamePlan(
             source=source,
@@ -130,6 +140,7 @@ def build_plans(
     tmdb_client: Optional[TMDBClient],
     library_hint: str,
     collision: str,
+    organize_root_tv: bool = True,
     debug: Optional[DebugLogger] = None,
 ) -> list[RenamePlan]:
     groups: dict[Path, list[Path]] = {}
@@ -154,6 +165,7 @@ def build_plans(
                 tmdb_client=tmdb_client,
                 library_hint=library_hint,
                 collision=collision,
+                organize_root_tv=organize_root_tv,
                 debug=debug,
             )
         )
@@ -167,6 +179,7 @@ def _make_plans_for_group(
     tmdb_client: Optional[TMDBClient],
     library_hint: str,
     collision: str,
+    organize_root_tv: bool,
     debug: Optional[DebugLogger] = None,
 ) -> list[RenamePlan]:
     local_guesses = {file_path: _local_guess(file_path, library_hint) for file_path in files}
@@ -233,7 +246,7 @@ def _make_plans_for_group(
                 )
                 continue
             guess = replace(guess, reason=f"{guess.reason} NVIDIA AI failed: {ai_error}".strip())
-        plans.append(_plan_from_guess(file_path, guess, collision))
+        plans.append(_plan_from_guess(file_path, root, guess, collision, organize_root_tv))
     debug_event(debug, "plans", [plan.to_dict() for plan in plans])
     return plans
 
@@ -261,10 +274,32 @@ def _classify_group(
     }
 
 
+def _target_directory(source: Path, root: Path, guess: MediaGuess, organize_root_tv: bool) -> Path:
+    if not organize_root_tv or guess.media_type != "tv":
+        return source.parent
+    if source.parent != root:
+        return source.parent
+    if _folder_looks_like_show(source.parent.name, guess):
+        return source.parent
+    return source.parent / build_plex_folder_name(guess)
+
+
+def _folder_looks_like_show(folder_name: str, guess: MediaGuess) -> bool:
+    folder_title = _normalize_title_for_compare(clean_folder_title(folder_name))
+    guess_title = _normalize_title_for_compare(guess.title)
+    plex_folder = _normalize_title_for_compare(build_plex_folder_name(guess))
+    return bool(folder_title and guess_title and folder_title in {guess_title, plex_folder})
+
+
+def _normalize_title_for_compare(value: str) -> str:
+    return re.sub(r"[^\w]+", "", value.lower())
+
+
 def apply_plan(plan: RenamePlan) -> RenamePlan:
     if plan.status != "planned" or plan.target is None:
         return plan
     try:
+        plan.target.parent.mkdir(parents=True, exist_ok=True)
         plan.source.rename(plan.target)
     except OSError as exc:
         return RenamePlan(
