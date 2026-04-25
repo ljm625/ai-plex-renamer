@@ -177,6 +177,32 @@ class RenamePriorityTests(unittest.TestCase):
         self.assertEqual(plans[0].target.name, "Harem Camp! - S01E01.mp4")
         self.assertEqual(plans[1].target.name, "Harem Camp! - S01E02.mp4")
 
+    def test_special_cm_files_use_season_zero_and_specials_folder(self):
+        parent = Path("/tmp/Hentai2/[Nekomoe kissaten&VCB-Studio] Araiya-san! Ore to Aitsu ga Onnayu de! [Ma10p_1080p]/SPs")
+        files = [
+            parent / "[Nekomoe kissaten&VCB-Studio] Araiya-san! Ore to Aitsu ga Onnayu de! [CM04][Ma10p_1080p][x265_flac].mkv",
+            parent / "[Nekomoe kissaten&VCB-Studio] Araiya-san! Ore to Aitsu ga Onnayu de! [CM05][Ma10p_1080p][x265_flac].mkv",
+        ]
+
+        plans = build_plans(files, Path("/tmp/Hentai2"), classifier=None, tmdb_client=None, library_hint="auto", collision="skip")
+
+        self.assertEqual(plans[0].target.parent.name, "Specials")
+        self.assertEqual(plans[0].target.name, "Araiya-san! Ore to Aitsu ga Onnayu de! - S00E04 - CM04.mkv")
+        self.assertEqual(plans[1].target.name, "Araiya-san! Ore to Aitsu ga Onnayu de! - S00E05 - CM05.mkv")
+
+    def test_unnumbered_special_files_skip_ai(self):
+        source = Path(
+            "/tmp/Hentai2/Araiya-san! Ore to Aitsu ga Onnayu de!/SPs/"
+            "[Nekomoe kissaten&VCB-Studio] Araiya-san! Ore to Aitsu ga Onnayu de! [Menu][Ma10p_1080p][x265].mkv"
+        )
+        classifier = _DummyClassifier(MediaGuess(media_type="tv", title="Wrong", season=1, episode=7))
+
+        plan = make_rename_plan(source, Path("/tmp/Hentai2"), classifier=classifier)
+
+        self.assertEqual(classifier.calls, 0)
+        self.assertEqual(plan.status, "skipped")
+        self.assertIn("has no episode number", plan.message)
+
     def test_root_tv_episode_moves_into_show_folder(self):
         source = Path("/tmp/Library/Treme.1x03.Right.Place.Wrong.Time.mkv")
 
@@ -328,6 +354,34 @@ class RenamePriorityTests(unittest.TestCase):
             self.assertEqual(applied.message, "Renamed successfully via copy fallback.")
             self.assertFalse(source.exists())
             self.assertEqual(target.read_text(encoding="utf-8"), "video")
+
+    def test_apply_plan_moves_matching_subtitle_sidecars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Show.1x01.mkv"
+            target = root / "Show - S01E01.mkv"
+            source.write_text("video", encoding="utf-8")
+            (root / "Show.1x01.ass").write_text("ass", encoding="utf-8")
+            (root / "Show.1x01.chs.ass").write_text("chs", encoding="utf-8")
+            (root / "Show.1x01.chi.srt").write_text("chi", encoding="utf-8")
+            unrelated = root / "Other.ass"
+            unrelated.write_text("other", encoding="utf-8")
+            plan = RenamePlan(
+                source=source,
+                target=target,
+                guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                status="planned",
+            )
+
+            applied = apply_plan(plan, retry_delays=())
+
+            self.assertEqual(applied.status, "renamed")
+            self.assertFalse((root / "Show.1x01.ass").exists())
+            self.assertEqual((root / "Show - S01E01.ass").read_text(encoding="utf-8"), "ass")
+            self.assertEqual((root / "Show - S01E01.chs.ass").read_text(encoding="utf-8"), "chs")
+            self.assertEqual((root / "Show - S01E01.chi.srt").read_text(encoding="utf-8"), "chi")
+            self.assertTrue(unrelated.exists())
+            self.assertIn("Moved 3 sidecar", applied.message)
 
     def test_sxxexx_language_suffix_does_not_search_as_title(self):
         source = Path("/tmp/Hentai2/聖痕のアリア/S01E01.chs.mp4")

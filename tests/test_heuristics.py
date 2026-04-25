@@ -84,6 +84,31 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(guess.episode, 1)
         self.assertIsNone(guess.episode_title)
 
+    def test_guess_special_cm_uses_season_zero_and_grandparent_title(self):
+        guess = guess_from_filename(
+            Path(
+                "/tmp/[Nekomoe kissaten&VCB-Studio] Araiya-san! Ore to Aitsu ga Onnayu de! [Ma10p_1080p]/SPs/"
+                "[Nekomoe kissaten&VCB-Studio] Araiya-san! Ore to Aitsu ga Onnayu de! [CM04][Ma10p_1080p][x265_flac].mkv"
+            )
+        )
+
+        self.assertEqual(guess.media_type, "tv")
+        self.assertEqual(guess.title, "Araiya-san! Ore to Aitsu ga Onnayu de!")
+        self.assertEqual(guess.season, 0)
+        self.assertEqual(guess.episode, 4)
+        self.assertEqual(guess.episode_title, "CM04")
+
+    def test_guess_unnumbered_special_is_not_usable(self):
+        guess = guess_from_filename(
+            Path(
+                "/tmp/Araiya-san! Ore to Aitsu ga Onnayu de!/SPs/"
+                "[Nekomoe kissaten&VCB-Studio] Araiya-san! Ore to Aitsu ga Onnayu de! [Menu][Ma10p_1080p][x265].mkv"
+            )
+        )
+
+        self.assertEqual(guess.media_type, "unknown")
+        self.assertIn("has no episode number", guess.reason)
+
     def test_sxxexx_without_title_uses_parent_folder(self):
         guess = guess_from_filename(Path("/tmp/LouisTheCat/S1E03.mp4"))
 

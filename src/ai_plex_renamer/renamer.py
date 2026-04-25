@@ -10,13 +10,21 @@ from typing import Iterable, Iterator, Optional
 from .ai import NvidiaAIClassifier
 from .debug import DebugLogger, debug_event
 from .guessit_parser import guess_with_guessit
-from .heuristics import clean_folder_title, guess_folder_episode_from_path, guess_from_filename
+from .heuristics import (
+    clean_folder_title,
+    coerce_special_guess,
+    guess_folder_episode_from_path,
+    guess_from_filename,
+    is_special_folder_name,
+    is_unnumbered_special_path,
+)
 from .models import MediaGuess, RenamePlan
 from .naming import build_plex_filename, build_plex_folder_name, is_video_file, resolve_collision
 from .tmdb import TMDBClient
 
 
 APPLY_RETRY_DELAYS = (0.2, 0.5)
+SIDECAR_EXTENSIONS = {".ass", ".idx", ".smi", ".srt", ".ssa", ".sub", ".sup", ".vtt"}
 
 
 def iter_media_files(root: Path, recursive: bool = True, include_hidden: bool = False) -> Iterator[Path]:
@@ -117,6 +125,8 @@ def _local_guess(source: Path, library_hint: str) -> MediaGuess:
 
 
 def _should_try_ai(source: Path, root: Path, guess: MediaGuess, library_hint: str) -> bool:
+    if is_unnumbered_special_path(source):
+        return False
     if not guess.is_usable():
         return True
     if library_hint == "tv" and guess.media_type != "tv":
@@ -187,7 +197,10 @@ def _make_plans_for_group(
     organize_root_tv: bool,
     debug: Optional[DebugLogger] = None,
 ) -> list[RenamePlan]:
-    local_guesses = {file_path: _local_guess(file_path, library_hint) for file_path in files}
+    local_guesses = {
+        file_path: coerce_special_guess(file_path, _local_guess(file_path, library_hint))
+        for file_path in files
+    }
     debug_event(
         debug,
         "local guesses",
@@ -233,7 +246,9 @@ def _make_plans_for_group(
             for file_path in needs_ai:
                 ai_guess = ai_guesses.get(file_path)
                 if ai_guess and ai_guess.is_usable():
-                    guesses[file_path] = _enrich_with_tmdb(ai_guess, tmdb_client)
+                    guesses[file_path] = _enrich_with_tmdb(coerce_special_guess(file_path, ai_guess), tmdb_client)
+                elif ai_guess:
+                    guesses[file_path] = coerce_special_guess(file_path, ai_guess)
 
     plans: list[RenamePlan] = []
     for file_path in files:
@@ -282,11 +297,24 @@ def _classify_group(
 def _target_directory(source: Path, root: Path, guess: MediaGuess, organize_root_tv: bool) -> Path:
     if not organize_root_tv or guess.media_type != "tv":
         return source.parent
+    if guess.season == 0:
+        return _target_special_directory(source, root, guess)
     if source.parent != root:
         return source.parent
     if _folder_looks_like_show(source.parent.name, guess):
         return source.parent
     return source.parent / build_plex_folder_name(guess)
+
+
+def _target_special_directory(source: Path, root: Path, guess: MediaGuess) -> Path:
+    if is_special_folder_name(source.parent.name):
+        if _normalize_title_for_compare(source.parent.name) in {"specials", "season00", "season0"}:
+            return source.parent
+        if source.parent != root:
+            return source.parent.parent / "Specials"
+    if source.parent == root:
+        return root / build_plex_folder_name(guess) / "Specials"
+    return source.parent
 
 
 def _folder_looks_like_show(folder_name: str, guess: MediaGuess) -> bool:
@@ -335,54 +363,53 @@ def apply_plan(plan: RenamePlan, retry_delays: Iterable[float] = APPLY_RETRY_DEL
         )
 
     delays = tuple(retry_delays)
-    for attempt in range(len(delays) + 1):
-        try:
-            source.rename(plan.target)
-        except FileNotFoundError as exc:
-            refreshed_source = _resolve_existing_source(source)
-            if refreshed_source is not None:
-                source = refreshed_source
-            if attempt < len(delays):
-                time.sleep(delays[attempt])
-                continue
-            fallback_plan = _copy_move_fallback(plan, source)
-            if fallback_plan is not None:
-                return fallback_plan
-            return RenamePlan(
-                source=plan.source,
-                target=plan.target,
-                guess=plan.guess,
-                status="error",
-                message=_rename_diagnostics(
-                    "Rename failed because Windows could not find the source path.",
-                    source,
-                    plan.target,
-                    exc,
-                ),
-            )
-        except OSError as exc:
-            return RenamePlan(
-                source=plan.source,
-                target=plan.target,
-                guess=plan.guess,
-                status="error",
-                message=_rename_diagnostics("Rename failed.", source, plan.target, exc),
-            )
-        else:
-            return RenamePlan(
-                source=plan.source,
-                target=plan.target,
-                guess=plan.guess,
-                status="renamed",
-                message="Renamed successfully.",
-            )
+    sidecar_moves = _find_sidecar_moves(source, plan.target)
+    sidecar_conflict = _first_existing_target(sidecar_moves)
+    if sidecar_conflict is not None:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=_rename_diagnostics(
+                "Target sidecar file already exists at apply time.",
+                sidecar_conflict[0],
+                sidecar_conflict[1],
+            ),
+        )
 
+    move_error, used_fallback = _move_path_with_retry(source, plan.target, delays)
+    if move_error is not None:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=move_error,
+        )
+
+    moved_sidecars = 0
+    for sidecar_source, sidecar_target in sidecar_moves:
+        sidecar_error, _ = _move_path_with_retry(sidecar_source, sidecar_target, delays)
+        if sidecar_error is not None:
+            return RenamePlan(
+                source=plan.source,
+                target=plan.target,
+                guess=plan.guess,
+                status="error",
+                message=f"Renamed video, but sidecar move failed: {sidecar_error}",
+            )
+        moved_sidecars += 1
+
+    message = "Renamed successfully via copy fallback." if used_fallback else "Renamed successfully."
+    if moved_sidecars:
+        message = f"{message} Moved {moved_sidecars} sidecar file(s)."
     return RenamePlan(
         source=plan.source,
         target=plan.target,
         guess=plan.guess,
-        status="error",
-        message=_rename_diagnostics("Rename failed for an unknown reason.", source, plan.target),
+        status="renamed",
+        message=message,
     )
 
 
@@ -401,28 +428,75 @@ def _resolve_existing_source(source: Path) -> Optional[Path]:
     return None
 
 
-def _copy_move_fallback(plan: RenamePlan, source: Path) -> Optional[RenamePlan]:
-    if plan.target is None:
-        return None
-    if _exists(source) is not True or _exists(plan.target) is True:
-        return None
+def _move_path_with_retry(source: Path, target: Path, retry_delays: Iterable[float]) -> tuple[Optional[str], bool]:
+    delays = tuple(retry_delays)
+    for attempt in range(len(delays) + 1):
+        try:
+            source.rename(target)
+        except FileNotFoundError as exc:
+            refreshed_source = _resolve_existing_source(source)
+            if refreshed_source is not None:
+                source = refreshed_source
+            if attempt < len(delays):
+                time.sleep(delays[attempt])
+                continue
+            fallback_error = _copy_move_fallback(source, target)
+            if fallback_error is None:
+                return None, True
+            return _rename_diagnostics(
+                "Rename failed because Windows could not find the source path.",
+                source,
+                target,
+                exc,
+            ), False
+        except OSError as exc:
+            return _rename_diagnostics("Rename failed.", source, target, exc), False
+        else:
+            return None, False
+    return _rename_diagnostics("Rename failed for an unknown reason.", source, target), False
+
+
+def _copy_move_fallback(source: Path, target: Path) -> Optional[str]:
+    if _exists(source) is not True or _exists(target) is True:
+        return _rename_diagnostics("Copy fallback was not usable.", source, target)
     try:
-        shutil.move(str(source), str(plan.target))
+        shutil.move(str(source), str(target))
     except OSError as exc:
-        return RenamePlan(
-            source=plan.source,
-            target=plan.target,
-            guess=plan.guess,
-            status="error",
-            message=_rename_diagnostics("Rename failed and copy fallback failed.", source, plan.target, exc),
-        )
-    return RenamePlan(
-        source=plan.source,
-        target=plan.target,
-        guess=plan.guess,
-        status="renamed",
-        message="Renamed successfully via copy fallback.",
-    )
+        return _rename_diagnostics("Rename failed and copy fallback failed.", source, target, exc)
+    return None
+
+
+def _find_sidecar_moves(source: Path, target: Path) -> list[tuple[Path, Path]]:
+    parent = source.parent
+    if not _exists(parent):
+        return []
+    moves: list[tuple[Path, Path]] = []
+    prefix = f"{source.stem}."
+    try:
+        candidates = sorted(parent.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
+        return []
+    for candidate in candidates:
+        if candidate == source or not candidate.is_file():
+            continue
+        if not _is_sidecar_for_source(candidate, prefix):
+            continue
+        suffix = candidate.name[len(source.stem):]
+        moves.append((candidate, target.with_name(f"{target.stem}{suffix}")))
+    return moves
+
+
+def _is_sidecar_for_source(candidate: Path, prefix: str) -> bool:
+    if candidate.suffix.lower() not in SIDECAR_EXTENSIONS:
+        return False
+    return candidate.name.casefold().startswith(prefix.casefold())
+
+
+def _first_existing_target(moves: Iterable[tuple[Path, Path]]) -> Optional[tuple[Path, Path]]:
+    for source, target in moves:
+        if _exists(target) is True and target != source:
+            return source, target
+    return None
 
 
 def _rename_diagnostics(message: str, source: Path, target: Path, exc: Optional[BaseException] = None) -> str:

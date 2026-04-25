@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 import unicodedata
 from pathlib import Path
@@ -48,6 +49,11 @@ EPISODE_RANGE_TOKEN_PATTERN = re.compile(r"^\d{1,3}\s*-\s*\d{1,3}$")
 NUMBERED_EPISODE_PATTERN = re.compile(r"(?i)(?:第\s*)?(?P<episode>\d{1,3})\s*(?:話|话|集|回)")
 EPISODE_AFTER_TITLE_TEMPLATE = r"(?i)^{title}(?:\s*[-_.]\s*|\s+)(?:episode|ep|e)?\s*(?P<episode>\d{{1,3}})(?=$|[\s._\-\(\[\{{])"
 FOLDER_TITLE_PREFIX_PATTERN = re.compile(r"(?i)^(?:ova|oav|oad|tv|series|movie)\s+")
+SPECIAL_FOLDER_NAMES = {"s0", "s00", "sp", "sps", "special", "specials", "season0", "season00"}
+SPECIAL_MARKER_PATTERN = re.compile(
+    r"(?i)^(?P<label>cm|sp|special|ova|oad|ncop|nced|op|ed|pv)(?P<number>\d{1,3})$"
+)
+UNNUMBERED_SPECIAL_MARKERS = {"commentary", "menu"}
 LANGUAGE_TAGS = {
     "big5",
     "chs",
@@ -85,6 +91,11 @@ def guess_from_filename(path: Path, library_hint: str = "auto") -> MediaGuess:
     parent = path.parent.name if path.parent else ""
     hint = library_hint.lower()
 
+    if hint != "movie":
+        special_guess = guess_special_from_path(path)
+        if special_guess.is_usable() or is_unnumbered_special_path(path):
+            return special_guess
+
     folder_episode_guess = guess_folder_episode_from_path(path)
     if folder_episode_guess.is_usable():
         return folder_episode_guess
@@ -115,6 +126,69 @@ def guess_from_filename(path: Path, library_hint: str = "auto") -> MediaGuess:
 
 def guess_folder_episode_from_path(path: Path) -> MediaGuess:
     return _guess_folder_episode(path.stem, path.parent.name if path.parent else "")
+
+
+def guess_special_from_path(path: Path) -> MediaGuess:
+    marker = _special_marker_from_path(path)
+    if marker is None:
+        return MediaGuess.unknown("No special marker matched.")
+
+    label, episode = marker
+    title = _title_for_special_path(path)
+    if not title:
+        return MediaGuess.unknown("Special marker found but no show title was clear.")
+    if episode is None:
+        return MediaGuess.unknown(
+            f"Special/extra marker {label} has no episode number; skipped to avoid unsafe Plex special numbering."
+        )
+
+    return MediaGuess(
+        media_type="tv",
+        title=title,
+        season=0,
+        episode=episode,
+        episode_title=label,
+        confidence=0.76,
+        reason="Matched a Plex special marker; Plex specials use Season 00.",
+    )
+
+
+def coerce_special_guess(path: Path, guess: MediaGuess) -> MediaGuess:
+    marker = _special_marker_from_path(path)
+    if marker is None:
+        return guess
+
+    label, episode = marker
+    if episode is None:
+        return MediaGuess.unknown(
+            f"Special/extra marker {label} has no episode number; skipped to avoid unsafe Plex special numbering."
+        )
+
+    title = guess.title or _title_for_special_path(path)
+    if not title:
+        return guess
+    if guess.media_type == "tv" and guess.season == 0 and guess.episode == episode:
+        return guess
+    return replace(
+        guess,
+        media_type="tv",
+        title=title,
+        season=0,
+        episode=episode,
+        episode_end=None,
+        episode_title=guess.episode_title or label,
+        confidence=max(guess.confidence, 0.76),
+        reason=_join_reason(guess.reason, "Forced to Plex Season 00 because the path is a special."),
+    )
+
+
+def is_unnumbered_special_path(path: Path) -> bool:
+    marker = _special_marker_from_path(path)
+    return marker is not None and marker[1] is None
+
+
+def is_special_folder_name(value: str) -> bool:
+    return _normalize_title_for_compare(clean_name_text(value)) in SPECIAL_FOLDER_NAMES
 
 
 def clean_name_text(value: str) -> str:
@@ -200,7 +274,7 @@ def _guess_folder_episode(stem: str, parent: str) -> MediaGuess:
 
 
 def clean_folder_title(value: str) -> str:
-    title = clean_name_text(value)
+    title = _clean_noisy_series_title(value) or clean_name_text(value)
     title = FOLDER_TITLE_PREFIX_PATTERN.sub("", title).strip()
     return title
 
@@ -224,6 +298,47 @@ def _episode_number_after_folder_title(value: str, title: str) -> Optional[int]:
     if not match:
         return None
     return _to_int(match.group("episode"))
+
+
+def _special_marker_from_path(path: Path) -> Optional[tuple[str, Optional[int]]]:
+    tokens = [clean_name_text(match.group("token")) for match in BRACKET_TOKEN_PATTERN.finditer(path.stem)]
+    for token in tokens:
+        marker = _special_marker_from_token(token)
+        if marker is not None:
+            return marker
+    if is_special_folder_name(path.parent.name if path.parent else ""):
+        for token in tokens:
+            if _normalize_title_for_compare(token) in UNNUMBERED_SPECIAL_MARKERS:
+                return (token, None)
+    return None
+
+
+def _special_marker_from_token(token: str) -> Optional[tuple[str, Optional[int]]]:
+    normalized = clean_name_text(token)
+    normalized_key = _normalize_title_for_compare(normalized)
+    if normalized_key in UNNUMBERED_SPECIAL_MARKERS:
+        return (normalized, None)
+    match = SPECIAL_MARKER_PATTERN.match(normalized_key)
+    if not match:
+        return None
+    label = match.group("label").upper()
+    number = _to_int(match.group("number"))
+    return (f"{label}{number:02d}" if number is not None else label, number)
+
+
+def _title_for_special_path(path: Path) -> str:
+    if is_special_folder_name(path.parent.name if path.parent else "") and path.parent.parent != path.parent:
+        title = clean_folder_title(path.parent.parent.name)
+        if title:
+            return title
+
+    marker = _special_marker_from_path(path)
+    if marker is not None and marker[1] is not None:
+        bracket_title = _title_from_filename_brackets(path.stem, clean_folder_title(path.parent.name), marker[1])
+        if bracket_title:
+            return bracket_title
+
+    return clean_folder_title(path.parent.name if path.parent else "")
 
 
 def _title_from_filename_brackets(stem: str, parent_title: str, episode: int) -> str:
@@ -262,11 +377,45 @@ def _is_bad_bracket_title_token(value: str) -> bool:
         return True
     if EPISODE_TOKEN_PATTERN.match(value) or EPISODE_RANGE_TOKEN_PATTERN.match(value):
         return True
+    if _special_marker_from_token(value) is not None:
+        return True
     return not clean_name_text(value)
+
+
+def _clean_noisy_series_title(value: str) -> str:
+    text = unicodedata.normalize("NFC", value)
+    text = re.sub(r"^(?:\s*[\[【(][^\]\】\)]{1,120}[\]】)]\s*)+", "", text)
+
+    def replace_bracket(match: re.Match[str]) -> str:
+        token = clean_name_text(match.group("token"))
+        return " " if _is_noisy_bracket_token(token) else f" {token} "
+
+    return clean_name_text(BRACKET_TOKEN_PATTERN.sub(replace_bracket, text))
+
+
+def _is_noisy_bracket_token(value: str) -> bool:
+    if not value:
+        return True
+    normalized = _normalize_title_for_compare(value)
+    if is_language_tag(value):
+        return True
+    if EPISODE_TOKEN_PATTERN.match(value) or EPISODE_RANGE_TOKEN_PATTERN.match(value):
+        return True
+    if _special_marker_from_token(value) is not None:
+        return True
+    if normalized in {"unc", "end", "premium"}:
+        return True
+    if re.search(r"(?i)(?:\d{3,4}p|webdl|webrip|bluray|bdrip|ma\d+p|x26[45]|h26[45]|hevc|avc|flac|aac)", value):
+        return True
+    return False
 
 
 def _normalize_title_for_compare(value: str) -> str:
     return re.sub(r"[^\w]+", "", value.lower())
+
+
+def _join_reason(*reasons: str) -> str:
+    return " ".join(reason.strip() for reason in reasons if reason and reason.strip())
 
 
 def _guess_movie(stem: str, parent: str) -> MediaGuess:

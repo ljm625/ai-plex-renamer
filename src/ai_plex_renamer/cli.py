@@ -161,11 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         dest="ai_timeout",
         type=int,
-        default=45,
+        default=600,
         help="AI request timeout in seconds.",
     )
     parser.add_argument("--ai-temperature", type=float, default=0.0, help="AI sampling temperature. Default: 0.0.")
-    parser.add_argument("--ai-max-tokens", type=int, default=512, help="Maximum AI response tokens. Default: 512.")
+    parser.add_argument("--ai-max-tokens", type=int, default=10240, help="Maximum AI response tokens. Default: 512.")
     parser.add_argument(
         "--ai-min-interval",
         "--min-interval",

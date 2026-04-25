@@ -283,6 +283,7 @@ Return this exact schema:
 
 Rules:
 - For TV, identify the show title, season number, episode number, optional ending episode for multi-episode files, and optional episode title.
+- For TV specials/extras in folders such as SP, SPs, Specials, or Season 00, use season 0. For markers like CM04, SP04, NCOP01, or NCED01, use the marker number as the episode. If a special such as Menu or Commentary has no safe episode number, return media_type "unknown".
 - If a file sits inside a folder that looks like a title and the filename has 前編, 後編, 上巻, 下巻, Part 1, or Part 2, prefer TV episode metadata.
 - For TV, include the show release year only when the file or folder makes it clear.
 - For movies, identify the movie title and release year when the file or folder makes it clear.
@@ -344,6 +345,7 @@ Return this exact schema:
 
 Rules:
 - Treat the files as related sibling files. Use the whole list to infer shared show/movie title and episode numbering.
+- For TV specials/extras in folders such as SP, SPs, Specials, or Season 00, use season 0. For markers like CM04, SP04, NCOP01, or NCED01, use the marker number as the episode. If a special such as Menu or Commentary has no safe episode number, return media_type "unknown".
 - If filenames differ mostly by #1, ＃2, 第1話, episode numbers, 前編/後編, Part 1/Part 2, prefer TV episode metadata.
 - For TV, keep the same show title across related files unless the folder clearly contains multiple shows.
 - For TV, include the show release year only when the file or folder makes it clear.

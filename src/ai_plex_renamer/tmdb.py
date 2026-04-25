@@ -119,8 +119,12 @@ class TMDBClient:
         year = _year_from_date(result.get("first_air_date")) or guess.year
         episode_title = guess.episode_title
         series_id = result.get("id")
+        episode_reason = ""
         if series_id and guess.season is not None and guess.episode is not None and guess.episode_end is None:
-            episode_title = self._episode_title(series_id, guess.season, guess.episode) or episode_title
+            try:
+                episode_title = self._episode_title(series_id, guess.season, guess.episode) or episode_title
+            except Exception as exc:
+                episode_reason = f"TMDB episode title lookup failed: {exc}"
 
         return replace(
             guess,
@@ -128,7 +132,7 @@ class TMDBClient:
             year=year,
             episode_title=episode_title,
             confidence=max(guess.confidence, 0.92),
-            reason=_join_reasons(guess.reason, "TMDB matched TV title/year."),
+            reason=_join_reasons(guess.reason, "TMDB matched TV title/year.", episode_reason),
         )
 
     def _episode_title(self, series_id: Any, season: int, episode: int) -> Optional[str]:

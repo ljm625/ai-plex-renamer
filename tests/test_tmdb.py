@@ -60,6 +60,27 @@ class TMDBClientTests(unittest.TestCase):
         self.assertEqual(guess.episode_title, "Infected")
         self.assertIn("TMDB matched TV", guess.reason)
 
+    def test_enrich_tv_keeps_year_when_special_episode_title_is_missing(self):
+        client = TMDBClient(bearer_token="token", transport=_transport_for_tv_missing_special)
+
+        guess = client.enrich(
+            MediaGuess(
+                media_type="tv",
+                title="Araiya-san! Ore to Aitsu ga Onnayu de!",
+                season=0,
+                episode=4,
+                episode_title="CM04",
+                confidence=0.76,
+            )
+        )
+
+        self.assertEqual(guess.title, "Araiya-san! Ore to Aitsu ga Onnayu de!")
+        self.assertEqual(guess.year, 2019)
+        self.assertEqual(guess.season, 0)
+        self.assertEqual(guess.episode_title, "CM04")
+        self.assertIn("TMDB matched TV", guess.reason)
+        self.assertIn("episode title lookup failed", guess.reason)
+
     def test_tmdb_failure_returns_original_guess_with_reason(self):
         def failing_transport(url, headers, timeout):
             raise RuntimeError("boom")
@@ -150,6 +171,25 @@ def _transport_for_tv(url, headers, timeout):
         }
     if "season/1/episode/2" in url:
         return {"name": "Infected"}
+    raise AssertionError(f"unexpected URL: {url}")
+
+
+def _transport_for_tv_missing_special(url, headers, timeout):
+    assert headers["Authorization"] == "Bearer token"
+    if "search/tv" in url:
+        return {
+            "results": [
+                {
+                    "id": 63447,
+                    "name": "Araiya-san! Ore to Aitsu ga Onnayu de!",
+                    "original_name": "Araiya-san! Ore to Aitsu ga Onnayu de!",
+                    "first_air_date": "2019-04-08",
+                    "popularity": 10,
+                }
+            ]
+        }
+    if "season/0/episode/4" in url:
+        raise RuntimeError("HTTP 404")
     raise AssertionError(f"unexpected URL: {url}")
 
 
