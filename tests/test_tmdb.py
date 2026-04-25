@@ -86,12 +86,40 @@ class TMDBClientTests(unittest.TestCase):
         def failing_transport(url, headers, timeout):
             raise RuntimeError("boom")
 
-        client = TMDBClient(bearer_token="token", transport=failing_transport)
+        client = TMDBClient(bearer_token="token", transport=failing_transport, retry_attempts=0)
         guess = client.enrich(MediaGuess(media_type="movie", title="Inception", year=2010))
 
         self.assertEqual(guess.title, "Inception")
         self.assertEqual(guess.year, 2010)
         self.assertIn("TMDB lookup failed: boom", guess.reason)
+
+    def test_tmdb_retries_transient_failure(self):
+        calls = []
+
+        def transport(url, headers, timeout):
+            calls.append(url)
+            if len(calls) < 3:
+                raise RuntimeError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol")
+            return _movie_response()
+
+        client = TMDBClient(api_key="key", transport=transport, retry_attempts=2, retry_delay_seconds=0)
+        guess = client.enrich(MediaGuess(media_type="movie", title="Inception", confidence=0.8))
+
+        self.assertEqual(guess.year, 2010)
+        self.assertEqual(len(calls), 3)
+
+    def test_tmdb_does_not_retry_non_retryable_http_404(self):
+        calls = []
+
+        def transport(url, headers, timeout):
+            calls.append(url)
+            raise RuntimeError("HTTP 404")
+
+        client = TMDBClient(api_key="key", transport=transport, retry_attempts=2, retry_delay_seconds=0)
+        guess = client.enrich(MediaGuess(media_type="movie", title="Inception", confidence=0.8))
+
+        self.assertIn("TMDB lookup failed: HTTP 404", guess.reason)
+        self.assertEqual(len(calls), 1)
 
     def test_repeated_tmdb_request_uses_memory_cache(self):
         calls = []
@@ -179,6 +207,31 @@ class TMDBRenameTests(unittest.TestCase):
             )
 
         self.assertEqual(plan.target.name, "The Last of Us (2023) - S01E02 - Infected.mkv")
+
+    def test_type_tv_default_is_skipped_when_tmdb_fails_after_retries(self):
+        calls = []
+
+        def failing_transport(url, headers, timeout):
+            calls.append(url)
+            raise RuntimeError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol")
+
+        client = TMDBClient(api_key="key", transport=failing_transport, retry_attempts=1, retry_delay_seconds=0)
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess.unknown("GuessIt did not find title, season, and episode."),
+        ):
+            plan = make_rename_plan(
+                Path("/tmp/Library/Lonely Show 1080p.mkv"),
+                Path("/tmp/Library"),
+                classifier=None,
+                tmdb_client=client,
+                library_hint="tv",
+            )
+
+        self.assertEqual(plan.status, "skipped")
+        self.assertIn("TMDB lookup failed after retries", plan.message)
+        self.assertEqual(len(calls), 2)
 
 
 def _transport_for_movie(url, headers, timeout):

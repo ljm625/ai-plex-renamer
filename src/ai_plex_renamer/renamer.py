@@ -90,6 +90,15 @@ def _plan_from_guess(
             message=guess.reason or "Could not infer Plex metadata safely.",
         )
 
+    if _should_skip_after_tmdb_failure(guess):
+        return RenamePlan(
+            source=source,
+            target=None,
+            guess=guess,
+            status="skipped",
+            message="TMDB lookup failed after retries; skipped low-confidence/default guess to avoid unsafe rename.",
+        )
+
     try:
         new_name = build_plex_filename(guess, source.suffix)
         target_dir = _target_directory(source, root, guess, organize_root_tv)
@@ -374,6 +383,17 @@ def _is_clear_single_tv_title(title: str) -> bool:
     if normalized in {"episode", "movie", "sample", "unknown", "video"}:
         return False
     return any(character.isalpha() for character in title)
+
+
+def _should_skip_after_tmdb_failure(guess: MediaGuess) -> bool:
+    reason = guess.reason or ""
+    if "TMDB lookup failed:" not in reason:
+        return False
+    if reason.startswith("Defaulted to S01E01"):
+        return True
+    if guess.confidence <= 0.6:
+        return True
+    return False
 
 
 def _classify_group(

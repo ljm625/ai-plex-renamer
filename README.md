@@ -103,6 +103,7 @@ ai-plex-renamer "/path/to/media" \
   --tmdb-language en-US \
   --tmdb-include-adult \
   --tmdb-cache-ttl-days 30 \
+  --tmdb-retries 2 \
   --nvidia-model meta/llama-3.1-8b-instruct \
   --collision skip \
   --apply

@@ -19,7 +19,22 @@ from .models import MediaGuess
 
 TMDBTransport = Callable[[str, Mapping[str, str], int], Mapping[str, Any]]
 DEFAULT_TMDB_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+DEFAULT_TMDB_RETRY_ATTEMPTS = 2
+DEFAULT_TMDB_RETRY_DELAY_SECONDS = 0.5
 TMDB_CACHE_VERSION = 1
+
+
+class TMDBHTTPError(RuntimeError):
+    def __init__(self, status_code: int, detail: str = "") -> None:
+        self.status_code = status_code
+        message = f"HTTP {status_code}"
+        if detail:
+            message = f"{message}: {detail}"
+        super().__init__(message)
+
+
+class TMDBTransportError(RuntimeError):
+    pass
 
 
 class TMDBClient:
@@ -36,6 +51,8 @@ class TMDBClient:
         debug: Optional[DebugLogger] = None,
         cache_path: Optional[Path] = None,
         cache_ttl_seconds: Optional[int] = DEFAULT_TMDB_CACHE_TTL_SECONDS,
+        retry_attempts: int = DEFAULT_TMDB_RETRY_ATTEMPTS,
+        retry_delay_seconds: float = DEFAULT_TMDB_RETRY_DELAY_SECONDS,
     ) -> None:
         self.bearer_token = bearer_token
         self.api_key = api_key
@@ -51,6 +68,8 @@ class TMDBClient:
         self._cache: dict[str, Mapping[str, Any]] = {}
         self._disk_cache: dict[str, Any] = {}
         self._disk_cache_loaded = False
+        self.retry_attempts = max(0, retry_attempts)
+        self.retry_delay_seconds = max(0.0, retry_delay_seconds)
 
     @classmethod
     def from_environment(
@@ -65,6 +84,8 @@ class TMDBClient:
         cache_path: Optional[Path] = None,
         cache_enabled: bool = True,
         cache_ttl_seconds: Optional[int] = DEFAULT_TMDB_CACHE_TTL_SECONDS,
+        retry_attempts: int = DEFAULT_TMDB_RETRY_ATTEMPTS,
+        retry_delay_seconds: float = DEFAULT_TMDB_RETRY_DELAY_SECONDS,
     ) -> Optional["TMDBClient"]:
         token = bearer_token or os.getenv("TMDB_BEARER_TOKEN")
         key = api_key or os.getenv("TMDB_API_KEY")
@@ -85,6 +106,8 @@ class TMDBClient:
             debug=debug,
             cache_path=resolved_cache_path,
             cache_ttl_seconds=cache_ttl_seconds,
+            retry_attempts=retry_attempts,
+            retry_delay_seconds=retry_delay_seconds,
         )
 
     def enrich(self, guess: MediaGuess) -> MediaGuess:
@@ -252,11 +275,41 @@ class TMDBClient:
                 "proxies": proxy_debug_info(),
             },
         )
-        data = self._transport(url, headers, self.timeout)
+        data = self._request_with_retries(endpoint, url, clean_params, headers)
         debug_event(self._debug, "tmdb response", {"endpoint": endpoint, "response": data})
         self._cache[cache_key] = data
         self._write_disk_cache(cache_key, data)
         return data
+
+    def _request_with_retries(
+        self,
+        endpoint: str,
+        url: str,
+        params: Mapping[str, Any],
+        headers: Mapping[str, str],
+    ) -> Mapping[str, Any]:
+        for attempt in range(self.retry_attempts + 1):
+            try:
+                return self._transport(url, headers, self.timeout)
+            except Exception as exc:
+                if attempt >= self.retry_attempts or not _is_retryable_error(exc):
+                    raise
+                delay = self.retry_delay_seconds * (attempt + 1)
+                debug_event(
+                    self._debug,
+                    "tmdb retry",
+                    {
+                        "endpoint": endpoint,
+                        "params": params,
+                        "attempt": attempt + 1,
+                        "max_attempts": self.retry_attempts,
+                        "delay_seconds": delay,
+                        "error": str(exc),
+                    },
+                )
+                if delay > 0:
+                    time.sleep(delay)
+        raise RuntimeError("TMDB retry loop exited unexpectedly.")
 
     def _read_disk_cache(self, cache_key: str) -> Optional[Mapping[str, Any]]:
         self._load_disk_cache()
@@ -337,9 +390,12 @@ def _urlopen_json(url: str, headers: Mapping[str, str], timeout: int) -> Mapping
         with urlopen_with_environment_proxy(request, timeout=timeout) as response:
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code}") from exc
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise TMDBHTTPError(exc.code, detail) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason)) from exc
+        raise TMDBTransportError(str(exc.reason)) from exc
+    except (OSError, TimeoutError) as exc:
+        raise TMDBTransportError(str(exc)) from exc
 
     data = json.loads(payload)
     if not isinstance(data, Mapping):
@@ -389,6 +445,19 @@ def _request_cache_key(endpoint: str, params: Mapping[str, Any]) -> str:
         "params": sorted(cache_params.items()),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, TMDBHTTPError):
+        return exc.status_code == 408 or exc.status_code == 429 or exc.status_code >= 500
+    if isinstance(exc, (TMDBTransportError, TimeoutError, OSError)):
+        return True
+    if isinstance(exc, RuntimeError):
+        text = str(exc).strip().lower()
+        if text.startswith("http 4") and not text.startswith(("http 408", "http 429")):
+            return False
+        return True
+    return False
 
 
 def _default_cache_path() -> Path:

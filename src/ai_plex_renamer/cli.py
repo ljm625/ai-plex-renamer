@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
             cache_path=Path(args.tmdb_cache).expanduser() if args.tmdb_cache else None,
             cache_enabled=not args.no_tmdb_cache,
             cache_ttl_seconds=_cache_ttl_seconds(args.tmdb_cache_ttl_days),
+            retry_attempts=args.tmdb_retries,
+            retry_delay_seconds=args.tmdb_retry_delay,
         )
 
     files = list(iter_media_files(root, recursive=args.recursive, include_hidden=args.include_hidden))
@@ -157,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         help="Days before cached TMDB responses expire. Use 0 for no expiry. Default: 30.",
+    )
+    parser.add_argument(
+        "--tmdb-retries",
+        type=int,
+        default=2,
+        help="Retry count for transient TMDB request failures. Default: 2.",
+    )
+    parser.add_argument(
+        "--tmdb-retry-delay",
+        type=float,
+        default=0.5,
+        help="Base delay in seconds between TMDB retries. Default: 0.5.",
     )
     parser.add_argument(
         "--nvidia-api-key",
