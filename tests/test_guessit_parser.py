@@ -165,6 +165,23 @@ class RenamePriorityTests(unittest.TestCase):
         self.assertEqual(plans[0].target.name, "Overflow - S01E01.mkv")
         self.assertEqual(plans[1].target.name, "Overflow - S01E02.mkv")
 
+    def test_japanese_volume_marker_file_uses_filename_title_not_parent_folder(self):
+        source = Path("/tmp/Library/作品名 THE ANIMATION 第2巻 v2.mkv")
+
+        plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None, tmdb_client=None)
+
+        self.assertEqual(plan.target, Path("/tmp/Library/作品名 THE ANIMATION/作品名 THE ANIMATION - S01E02.mkv"))
+        self.assertEqual(plan.guess.title, "作品名 THE ANIMATION")
+        self.assertEqual(plan.guess.episode, 2)
+
+    def test_japanese_kanji_episode_marker_file_is_planned(self):
+        source = Path("/tmp/Library/作品名 第一話.mkv")
+
+        plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None, tmdb_client=None)
+
+        self.assertEqual(plan.target, Path("/tmp/Library/作品名/作品名 - S01E01.mkv"))
+        self.assertEqual(plan.guess.episode, 1)
+
     def test_bracket_title_beats_noisy_parent_directory(self):
         parent = Path("/tmp/Hentai2/[KyokuSai] Harem Camp! [01-08][720P][WEB-DL][UNC]")
         files = [

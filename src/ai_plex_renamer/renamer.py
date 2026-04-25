@@ -369,7 +369,7 @@ def _strip_trailing_episode_marker(title: str) -> str:
         r"(?:"
         r"\s*[-_. ]+\s*(?:episode|ep|e|\#)?\s*\d{1,3}"
         r"|"
-        r"\s*第\s*\d{1,3}\s*(?:話|话|集|回)"
+        r"\s*第\s*[\d零〇一二三四五六七八九十百壱弐参兩两]{1,8}\s*(?:話|话|集|回|巻|卷)(?:\s*v\d{1,3})?"
         r")$",
         "",
         title,

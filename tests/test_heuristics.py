@@ -70,6 +70,31 @@ class HeuristicTests(unittest.TestCase):
         self.assertEqual(guess.episode, 1)
         self.assertIsNone(guess.episode_title)
 
+    def test_guess_japanese_volume_marker_uses_filename_title_and_ignores_version_suffix(self):
+        guess = guess_from_filename(Path("/tmp/Library/作品名 THE ANIMATION 第2巻 v2.mkv"))
+
+        self.assertEqual(guess.media_type, "tv")
+        self.assertEqual(guess.title, "作品名 THE ANIMATION")
+        self.assertEqual(guess.season, 1)
+        self.assertEqual(guess.episode, 2)
+        self.assertIsNone(guess.episode_title)
+
+    def test_guess_japanese_kanji_episode_marker(self):
+        guess = guess_from_filename(Path("作品名 第一話.mkv"))
+
+        self.assertEqual(guess.media_type, "tv")
+        self.assertEqual(guess.title, "作品名")
+        self.assertEqual(guess.season, 1)
+        self.assertEqual(guess.episode, 1)
+        self.assertIsNone(guess.episode_title)
+
+    def test_guess_japanese_kanji_episode_marker_above_ten(self):
+        guess = guess_from_filename(Path("作品名 第十二話.mkv"))
+
+        self.assertEqual(guess.media_type, "tv")
+        self.assertEqual(guess.title, "作品名")
+        self.assertEqual(guess.episode, 12)
+
     def test_guess_folder_episode_prefers_bracket_title_over_noisy_parent(self):
         guess = guess_from_filename(
             Path(
