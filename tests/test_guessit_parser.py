@@ -165,6 +165,18 @@ class RenamePriorityTests(unittest.TestCase):
         self.assertEqual(plans[0].target.name, "Overflow - S01E01.mkv")
         self.assertEqual(plans[1].target.name, "Overflow - S01E02.mkv")
 
+    def test_bracket_title_beats_noisy_parent_directory(self):
+        parent = Path("/tmp/Hentai2/[KyokuSai] Harem Camp! [01-08][720P][WEB-DL][UNC]")
+        files = [
+            parent / "[Eternal][Harem Camp!][01][GB][720P][Premium].mp4",
+            parent / "[Eternal][Harem Camp!][02][GB][720P][Premium].mp4",
+        ]
+
+        plans = build_plans(files, Path("/tmp/Hentai2"), classifier=None, tmdb_client=None, library_hint="auto", collision="skip")
+
+        self.assertEqual(plans[0].target.name, "Harem Camp! - S01E01.mp4")
+        self.assertEqual(plans[1].target.name, "Harem Camp! - S01E02.mp4")
+
     def test_root_tv_episode_moves_into_show_folder(self):
         source = Path("/tmp/Library/Treme.1x03.Right.Place.Wrong.Time.mkv")
 

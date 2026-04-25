@@ -42,6 +42,9 @@ FOLDER_EPISODE_PATTERNS = [
 ]
 HASH_EPISODE_PATTERN = re.compile(r"(?i)(?:[#＃]\s*|(?:episode|ep)\s*\.?\s*)(?P<episode>\d{1,3})")
 BRACKET_EPISODE_PATTERN = re.compile(r"(?i)[\[【(]\s*(?P<episode>\d{1,3})\s*[\]】)]")
+BRACKET_TOKEN_PATTERN = re.compile(r"[\[【(]\s*(?P<token>[^\]\】\)]{1,120}?)\s*[\]】)]")
+EPISODE_TOKEN_PATTERN = re.compile(r"^\d{1,3}$")
+EPISODE_RANGE_TOKEN_PATTERN = re.compile(r"^\d{1,3}\s*-\s*\d{1,3}$")
 NUMBERED_EPISODE_PATTERN = re.compile(r"(?i)(?:第\s*)?(?P<episode>\d{1,3})\s*(?:話|话|集|回)")
 EPISODE_AFTER_TITLE_TEMPLATE = r"(?i)^{title}(?:\s*[-_.]\s*|\s+)(?:episode|ep|e)?\s*(?P<episode>\d{{1,3}})(?=$|[\s._\-\(\[\{{])"
 FOLDER_TITLE_PREFIX_PATTERN = re.compile(r"(?i)^(?:ova|oav|oad|tv|series|movie)\s+")
@@ -181,6 +184,10 @@ def _guess_folder_episode(stem: str, parent: str) -> MediaGuess:
     if episode is None:
         return MediaGuess.unknown("No folder episode marker matched.")
 
+    bracket_title = _title_from_filename_brackets(stem, title, episode)
+    if bracket_title:
+        title = bracket_title
+
     return MediaGuess(
         media_type="tv",
         title=title,
@@ -217,6 +224,49 @@ def _episode_number_after_folder_title(value: str, title: str) -> Optional[int]:
     if not match:
         return None
     return _to_int(match.group("episode"))
+
+
+def _title_from_filename_brackets(stem: str, parent_title: str, episode: int) -> str:
+    tokens = [clean_name_text(match.group("token")) for match in BRACKET_TOKEN_PATTERN.finditer(stem)]
+    episode_index = _episode_token_index(tokens, episode)
+    if episode_index is None or episode_index == 0:
+        return ""
+
+    parent_normalized = _normalize_title_for_compare(parent_title)
+    matches: list[str] = []
+    for token in tokens[:episode_index]:
+        if _is_bad_bracket_title_token(token):
+            continue
+        token_normalized = _normalize_title_for_compare(token)
+        if not token_normalized:
+            continue
+        if parent_normalized and (token_normalized in parent_normalized or parent_normalized in token_normalized):
+            matches.append(token)
+
+    return matches[-1] if matches else ""
+
+
+def _episode_token_index(tokens: list[str], episode: int) -> Optional[int]:
+    for index, token in enumerate(tokens):
+        if not EPISODE_TOKEN_PATTERN.match(token):
+            continue
+        if _to_int(token) == episode:
+            return index
+    return None
+
+
+def _is_bad_bracket_title_token(value: str) -> bool:
+    if not value:
+        return True
+    if is_language_tag(value):
+        return True
+    if EPISODE_TOKEN_PATTERN.match(value) or EPISODE_RANGE_TOKEN_PATTERN.match(value):
+        return True
+    return not clean_name_text(value)
+
+
+def _normalize_title_for_compare(value: str) -> str:
+    return re.sub(r"[^\w]+", "", value.lower())
 
 
 def _guess_movie(stem: str, parent: str) -> MediaGuess:
