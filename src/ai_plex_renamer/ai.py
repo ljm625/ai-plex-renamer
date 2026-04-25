@@ -19,6 +19,35 @@ NVIDIA_DEFAULT_MODEL = "meta/llama-3.1-8b-instruct"
 
 AITransport = Callable[[str, Mapping[str, str], Mapping[str, Any], int], Mapping[str, Any]]
 
+SINGLE_RESPONSE_SCHEMA = """{
+  "media_type": "tv" | "movie" | "unknown",
+  "title": "canonical show or movie title, no release tags",
+  "year": 2024 | null,
+  "season": 1 | null,
+  "episode": 2 | null,
+  "episode_end": 3 | null,
+  "episode_title": "episode title if clear" | null,
+  "confidence": 0.0,
+  "reason": "short reason"
+}"""
+
+BATCH_RESPONSE_SCHEMA = """{
+  "files": [
+    {
+      "index": 1,
+      "media_type": "tv" | "movie" | "unknown",
+      "title": "canonical show or movie title, no release tags",
+      "year": 2024 | null,
+      "season": 1 | null,
+      "episode": 2 | null,
+      "episode_end": 3 | null,
+      "episode_title": "episode title if clear" | null,
+      "confidence": 0.0,
+      "reason": "short reason"
+    }
+  ]
+}"""
+
 
 class AIUnavailable(RuntimeError):
     pass
@@ -34,6 +63,7 @@ class NvidiaAIClassifier:
         temperature: float = 0.0,
         max_tokens: int = 512,
         min_interval: float = 0.0,
+        json_repair_attempts: int = 1,
         transport: Optional[AITransport] = None,
         debug: Optional[DebugLogger] = None,
     ) -> None:
@@ -47,6 +77,7 @@ class NvidiaAIClassifier:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.min_interval = min_interval
+        self.json_repair_attempts = max(0, json_repair_attempts)
         self._transport = transport or _urlopen_json
         self._debug = debug
         self._last_call = 0.0
@@ -58,7 +89,7 @@ class NvidiaAIClassifier:
         library_hint: str,
         local_guess: MediaGuess,
     ) -> MediaGuess:
-        self._wait_for_rate_limit()
+        prompt = build_prompt(path, root, library_hint, local_guess)
         payload = {
             "model": self.model,
             "messages": [
@@ -68,38 +99,21 @@ class NvidiaAIClassifier:
                 },
                 {
                     "role": "user",
-                    "content": build_prompt(path, root, library_hint, local_guess),
+                    "content": prompt,
                 },
             ],
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "stream": False,
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        debug_event(
-            self._debug,
-            "nvidia request",
-            {
-                "url": f"{self.base_url}/chat/completions",
-                "headers": headers,
-                "payload": payload,
-                "timeout": self.timeout,
-            },
+        content = self._chat(payload, self._headers(), "nvidia request", "nvidia response")
+        return self._parse_with_json_repair(
+            content,
+            parse_ai_response,
+            original_prompt=prompt,
+            expected_schema=SINGLE_RESPONSE_SCHEMA,
+            max_tokens=self.max_tokens,
         )
-        response = self._transport(
-            f"{self.base_url}/chat/completions",
-            headers,
-            payload,
-            self.timeout,
-        )
-        debug_event(self._debug, "nvidia response", response)
-        self._last_call = time.monotonic()
-        content = _message_content(response)
-        return parse_ai_response(content)
 
     def classify_many(
         self,
@@ -111,7 +125,8 @@ class NvidiaAIClassifier:
         if not paths:
             return {}
 
-        self._wait_for_rate_limit()
+        prompt = build_batch_prompt(paths, root, library_hint, local_guesses)
+        max_tokens = max(self.max_tokens, min(4096, 360 * len(paths)))
         payload = {
             "model": self.model,
             "messages": [
@@ -121,39 +136,113 @@ class NvidiaAIClassifier:
                 },
                 {
                     "role": "user",
-                    "content": build_batch_prompt(paths, root, library_hint, local_guesses),
+                    "content": prompt,
                 },
             ],
             "temperature": self.temperature,
-            "max_tokens": max(self.max_tokens, min(4096, 360 * len(paths))),
+            "max_tokens": max_tokens,
             "stream": False,
         }
-        headers = {
+        content = self._chat(
+            payload,
+            self._headers(),
+            "nvidia batch request",
+            "nvidia batch response",
+            {"file_count": len(paths)},
+        )
+        return self._parse_with_json_repair(
+            content,
+            lambda value: parse_ai_batch_response(value, paths),
+            original_prompt=prompt,
+            expected_schema=BATCH_RESPONSE_SCHEMA,
+            max_tokens=max_tokens,
+        )
+
+    def _headers(self) -> dict[str, str]:
+        return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        debug_event(
-            self._debug,
-            "nvidia batch request",
-            {
-                "url": f"{self.base_url}/chat/completions",
-                "headers": headers,
-                "payload": payload,
-                "timeout": self.timeout,
-                "file_count": len(paths),
-            },
-        )
+
+    def _chat(
+        self,
+        payload: Mapping[str, Any],
+        headers: Mapping[str, str],
+        request_title: str,
+        response_title: str,
+        extra_debug: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        self._wait_for_rate_limit()
+        debug_data: dict[str, Any] = {
+            "url": f"{self.base_url}/chat/completions",
+            "headers": headers,
+            "payload": payload,
+            "timeout": self.timeout,
+        }
+        if extra_debug:
+            debug_data.update(extra_debug)
+        debug_event(self._debug, request_title, debug_data)
         response = self._transport(
             f"{self.base_url}/chat/completions",
             headers,
             payload,
             self.timeout,
         )
-        debug_event(self._debug, "nvidia batch response", response)
+        debug_event(self._debug, response_title, response)
         self._last_call = time.monotonic()
-        content = _message_content(response)
-        return parse_ai_batch_response(content, paths)
+        return _message_content(response)
+
+    def _parse_with_json_repair(
+        self,
+        content: str,
+        parser: Callable[[str], Any],
+        original_prompt: str,
+        expected_schema: str,
+        max_tokens: int,
+    ) -> Any:
+        try:
+            return parser(content)
+        except Exception as exc:
+            parse_error = exc
+
+        for attempt in range(1, self.json_repair_attempts + 1):
+            repair_payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You repair invalid JSON. Return valid JSON only.",
+                    },
+                    {
+                        "role": "user",
+                        "content": build_json_repair_prompt(
+                            invalid_response=content,
+                            error=parse_error,
+                            original_prompt=original_prompt,
+                            expected_schema=expected_schema,
+                        ),
+                    },
+                ],
+                "temperature": 0.0,
+                "max_tokens": max(max_tokens, self.max_tokens, 1024),
+                "stream": False,
+            }
+            content = self._chat(
+                repair_payload,
+                self._headers(),
+                "nvidia json repair request",
+                "nvidia json repair response",
+                {"attempt": attempt},
+            )
+            try:
+                return parser(content)
+            except Exception as exc:
+                parse_error = exc
+
+        raise ValueError(
+            f"AI returned invalid JSON after {self.json_repair_attempts} repair attempt(s): {parse_error}"
+        ) from parse_error
 
     def _wait_for_rate_limit(self) -> None:
         if self._last_call <= 0 or self.min_interval <= 0:
@@ -263,6 +352,37 @@ Rules:
 - Use the original title language when possible.
 - If a file is unsafe to rename, use media_type "unknown" for that file.
 - Return one result for every input index. Output JSON only; no Markdown and no explanation outside JSON.
+"""
+
+
+def build_json_repair_prompt(
+    invalid_response: str,
+    error: Exception,
+    original_prompt: str,
+    expected_schema: str,
+) -> str:
+    return f"""The previous response could not be parsed as valid JSON.
+
+Parser/schema error:
+{error}
+
+Original task:
+{original_prompt}
+
+Expected JSON schema:
+{expected_schema}
+
+Invalid response:
+```text
+{invalid_response}
+```
+
+Repair rules:
+- Return only one valid JSON value matching the expected schema.
+- Use double-quoted JSON strings, explicit commas, and null instead of Python None.
+- Do not wrap the answer in Markdown.
+- Preserve the intended media metadata from the invalid response when possible.
+- If a field cannot be recovered safely, use null, an empty string, or media_type "unknown".
 """
 
 

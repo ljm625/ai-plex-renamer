@@ -114,6 +114,19 @@ ai-plex-renamer "/path/to/media" --verbose
 
 `--verbose` 会把分组、本地解析、TMDB 请求/响应、NVIDIA 请求/响应打印到 stderr；`Authorization`、`api_key` 等敏感信息会自动脱敏。
 
+默认情况下，如果在扫描根目录直接发现 TV 剧集文件，会自动计划移动到剧集文件夹：
+
+```text
+Treme.1x03.Right.Place.Wrong.Time.mkv
+-> Treme/Treme - S01E03 - Right Place Wrong Time.mkv
+```
+
+如果文件已经在剧集目录里，则只改文件名，不会再嵌套一层。可以用下面的参数关闭自动建剧集目录：
+
+```bash
+ai-plex-renamer "/path/to/media" --no-organize-root-tv
+```
+
 ## Plex 命名结果
 
 电视剧：
@@ -149,3 +162,21 @@ ai-plex-renamer-macos-arm64.tar.gz
 ```
 
 也可以在 GitHub Actions 页面手动运行 `Release` workflow 生成构建 artifacts；只有 tag 触发时才会创建 GitHub Release。
+
+## Windows Dry-Run Script
+
+可以复制并修改 [scripts/dry-run-windows.bat](scripts/dry-run-windows.bat) 里的 key：
+
+```bat
+set "TMDB_API_KEY=PASTE_TMDB_API_KEY_HERE"
+set "NVIDIA_API_KEY=PASTE_NVIDIA_API_KEY_HERE"
+set "NVIDIA_MODEL=meta/llama-3.1-8b-instruct"
+```
+
+双击或在 PowerShell/CMD 中运行：
+
+```bat
+scripts\dry-run-windows.bat
+```
+
+脚本会提示输入媒体目录，并只执行 dry-run，不会重命名文件。

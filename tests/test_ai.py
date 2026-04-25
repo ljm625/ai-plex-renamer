@@ -84,6 +84,67 @@ class AIResponseTests(unittest.TestCase):
         self.assertEqual(guess.title, "Inception")
         self.assertEqual(guess.year, 2010)
 
+    def test_nvidia_classifier_repairs_invalid_json_response(self):
+        payloads = []
+
+        def transport(url, headers, payload, timeout):
+            payloads.append(payload)
+            content = (
+                '{"media_type":"movie" "title":"Inception","year":2010,"confidence":0.9}'
+                if len(payloads) == 1
+                else '{"media_type":"movie","title":"Inception","year":2010,"confidence":0.9}'
+            )
+            return {"choices": [{"message": {"content": content}}]}
+
+        classifier = NvidiaAIClassifier(api_key="nvapi-test", transport=transport)
+
+        guess = classifier.classify(
+            Path("/tmp/Inception.1080p.mkv"),
+            Path("/tmp"),
+            "auto",
+            MediaGuess(media_type="movie", title="Inception", confidence=0.55),
+        )
+
+        self.assertEqual(len(payloads), 2)
+        self.assertEqual(payloads[1]["temperature"], 0.0)
+        self.assertIn("Parser/schema error", payloads[1]["messages"][1]["content"])
+        self.assertIn("Invalid response", payloads[1]["messages"][1]["content"])
+        self.assertEqual(guess.title, "Inception")
+        self.assertEqual(guess.year, 2010)
+
+    def test_nvidia_batch_classifier_repairs_invalid_json_response(self):
+        payloads = []
+        paths = [Path("/tmp/show/ep1.mkv"), Path("/tmp/show/ep2.mkv")]
+
+        def transport(url, headers, payload, timeout):
+            payloads.append(payload)
+            content = (
+                '{"files":[{"index":1,"media_type":"tv","title":"Show","season":1,"episode":1} '
+                '{"index":2,"media_type":"tv","title":"Show","season":1,"episode":2}]}'
+                if len(payloads) == 1
+                else (
+                    '{"files":['
+                    '{"index":1,"media_type":"tv","title":"Show","season":1,"episode":1},'
+                    '{"index":2,"media_type":"tv","title":"Show","season":1,"episode":2}'
+                    "]}"
+                )
+            )
+            return {"choices": [{"message": {"content": content}}]}
+
+        classifier = NvidiaAIClassifier(api_key="nvapi-test", transport=transport)
+
+        guesses = classifier.classify_many(
+            paths,
+            Path("/tmp"),
+            "auto",
+            {path: MediaGuess.unknown("No local guess.") for path in paths},
+        )
+
+        self.assertEqual(len(payloads), 2)
+        self.assertIn("Expected JSON schema", payloads[1]["messages"][1]["content"])
+        self.assertEqual(guesses[paths[0]].episode, 1)
+        self.assertEqual(guesses[paths[1]].episode, 2)
+
     def test_nvidia_classifier_verbose_logs_request_and_response(self):
         logs = []
 
