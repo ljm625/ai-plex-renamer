@@ -25,10 +25,6 @@ jobs:
             asset_name: ai-plex-renamer-windows-x86_64
             archive: zip
             binary: ai-plex-renamer.exe
-          - os: macos-13
-            asset_name: ai-plex-renamer-macos-x86_64
-            archive: tar.gz
-            binary: ai-plex-renamer
           - os: macos-14
             asset_name: ai-plex-renamer-macos-arm64
             archive: tar.gz
