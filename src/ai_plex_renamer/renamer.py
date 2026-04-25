@@ -12,6 +12,7 @@ from .debug import DebugLogger, debug_event
 from .guessit_parser import guess_with_guessit
 from .heuristics import (
     clean_folder_title,
+    clean_name_text,
     coerce_special_guess,
     guess_folder_episode_from_path,
     guess_from_filename,
@@ -135,6 +136,8 @@ def _local_guess(source: Path, library_hint: str) -> MediaGuess:
 
 
 def _should_try_ai(source: Path, root: Path, guess: MediaGuess, library_hint: str) -> bool:
+    if library_hint == "tv" and _is_usable_tv_guess(guess):
+        return False
     if is_unnumbered_special_path(source):
         return False
     if not guess.is_usable():
@@ -207,10 +210,11 @@ def _make_plans_for_group(
     organize_root_tv: bool,
     debug: Optional[DebugLogger] = None,
 ) -> list[RenamePlan]:
-    local_guesses = {
+    raw_local_guesses = {
         file_path: coerce_special_guess(file_path, _local_guess(file_path, library_hint))
         for file_path in files
     }
+    local_guesses = _with_tv_episode_defaults(files, root, raw_local_guesses, library_hint)
     debug_event(
         debug,
         "local guesses",
@@ -260,6 +264,7 @@ def _make_plans_for_group(
                 elif ai_guess:
                     guesses[file_path] = coerce_special_guess(file_path, ai_guess)
 
+    guesses = _with_tv_episode_defaults(files, root, guesses, library_hint)
     plans: list[RenamePlan] = []
     for file_path in files:
         guess = guesses[file_path]
@@ -279,6 +284,96 @@ def _make_plans_for_group(
         plans.append(_plan_from_guess(file_path, root, guess, collision, organize_root_tv))
     debug_event(debug, "plans", [plan.to_dict() for plan in plans])
     return plans
+
+
+def _with_tv_episode_defaults(
+    files: list[Path],
+    root: Path,
+    guesses: dict[Path, MediaGuess],
+    library_hint: str,
+) -> dict[Path, MediaGuess]:
+    if library_hint != "tv":
+        return guesses
+
+    candidates: dict[Path, str] = {}
+    title_counts: dict[str, int] = {}
+    for file_path in files:
+        guess = guesses[file_path]
+        if is_unnumbered_special_path(file_path) or _is_usable_tv_guess(guess):
+            continue
+        title = _single_tv_episode_title(file_path, root, guess)
+        if not _is_clear_single_tv_title(title):
+            continue
+        key = _single_tv_episode_title_key(file_path, root, guess, title)
+        if not key:
+            continue
+        candidates[file_path] = title
+        title_counts[key] = title_counts.get(key, 0) + 1
+
+    if not candidates:
+        return guesses
+
+    defaulted = dict(guesses)
+    for file_path, title in candidates.items():
+        key = _single_tv_episode_title_key(file_path, root, guesses[file_path], title)
+        if title_counts[key] != 1:
+            continue
+        defaulted[file_path] = MediaGuess(
+            media_type="tv",
+            title=title,
+            season=1,
+            episode=1,
+            confidence=0.55,
+            reason=(
+                "Defaulted to S01E01 because --type tv was provided and this file has a unique inferred title."
+            ),
+        )
+    return defaulted
+
+
+def _is_usable_tv_guess(guess: MediaGuess) -> bool:
+    return guess.media_type == "tv" and guess.is_usable()
+
+
+def _single_tv_episode_title(source: Path, root: Path, guess: MediaGuess) -> str:
+    if guess.title:
+        return clean_folder_title(guess.title)
+    if source.parent != root:
+        parent_title = clean_folder_title(source.parent.name)
+        if parent_title:
+            return parent_title
+    return clean_folder_title(source.stem) or clean_name_text(source.stem)
+
+
+def _single_tv_episode_title_key(source: Path, root: Path, guess: MediaGuess, title: str) -> str:
+    compare_title = title
+    if not guess.title and source.parent == root:
+        compare_title = _strip_trailing_episode_marker(title) or title
+    if not _is_clear_single_tv_title(compare_title):
+        return ""
+    return _normalize_title_for_compare(compare_title)
+
+
+def _strip_trailing_episode_marker(title: str) -> str:
+    return re.sub(
+        r"(?ix)"
+        r"(?:"
+        r"\s*[-_. ]+\s*(?:episode|ep|e|\#)?\s*\d{1,3}"
+        r"|"
+        r"\s*第\s*\d{1,3}\s*(?:話|话|集|回)"
+        r")$",
+        "",
+        title,
+    ).strip(" -_.")
+
+
+def _is_clear_single_tv_title(title: str) -> bool:
+    normalized = _normalize_title_for_compare(title)
+    if not normalized or normalized.isdigit():
+        return False
+    if normalized in {"episode", "movie", "sample", "unknown", "video"}:
+        return False
+    return any(character.isalpha() for character in title)
 
 
 def _classify_group(

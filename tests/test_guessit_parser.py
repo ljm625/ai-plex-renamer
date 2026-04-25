@@ -203,6 +203,89 @@ class RenamePriorityTests(unittest.TestCase):
         self.assertEqual(plan.status, "skipped")
         self.assertIn("has no episode number", plan.message)
 
+    def test_type_tv_single_unparsed_file_defaults_to_s01e01_from_filename(self):
+        source = Path("/tmp/Library/Lonely Show 1080p.mkv")
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess.unknown("GuessIt did not find title, season, and episode."),
+        ):
+            plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None, library_hint="tv")
+
+        self.assertEqual(plan.target, Path("/tmp/Library/Lonely Show/Lonely Show - S01E01.mkv"))
+        self.assertEqual(plan.guess.media_type, "tv")
+        self.assertEqual(plan.guess.title, "Lonely Show")
+        self.assertEqual(plan.guess.season, 1)
+        self.assertEqual(plan.guess.episode, 1)
+
+    def test_type_tv_single_unparsed_file_uses_parent_title_inside_show_folder(self):
+        source = Path("/tmp/Library/Lonely Show/weird-release-name.mkv")
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess.unknown("GuessIt did not find title, season, and episode."),
+        ):
+            plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None, library_hint="tv")
+
+        self.assertEqual(plan.target, Path("/tmp/Library/Lonely Show/Lonely Show - S01E01.mkv"))
+        self.assertEqual(plan.guess.title, "Lonely Show")
+
+    def test_type_tv_multiple_unparsed_root_files_default_when_titles_are_unique(self):
+        files = [
+            Path("/tmp/Library/Lonely Show 1080p.mkv"),
+            Path("/tmp/Library/Another Special.mkv"),
+        ]
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess.unknown("GuessIt did not find title, season, and episode."),
+        ):
+            plans = build_plans(files, Path("/tmp/Library"), classifier=None, tmdb_client=None, library_hint="tv", collision="skip")
+
+        self.assertEqual(plans[0].target, Path("/tmp/Library/Lonely Show/Lonely Show - S01E01.mkv"))
+        self.assertEqual(plans[1].target, Path("/tmp/Library/Another Special/Another Special - S01E01.mkv"))
+
+    def test_type_tv_multiple_unparsed_files_do_not_default_to_s01e01(self):
+        files = [
+            Path("/tmp/Library/Lonely Show/weird-a.mkv"),
+            Path("/tmp/Library/Lonely Show/weird-b.mkv"),
+        ]
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess.unknown("GuessIt did not find title, season, and episode."),
+        ):
+            plans = build_plans(files, Path("/tmp/Library"), classifier=None, tmdb_client=None, library_hint="tv", collision="skip")
+
+        self.assertEqual(plans[0].status, "skipped")
+        self.assertEqual(plans[1].status, "skipped")
+
+    def test_type_tv_multiple_unparsed_root_files_with_same_title_do_not_default(self):
+        files = [
+            Path("/tmp/Library/Lonely Show - 01.mkv"),
+            Path("/tmp/Library/Lonely Show - 02.mkv"),
+        ]
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess.unknown("GuessIt did not find title, season, and episode."),
+        ):
+            plans = build_plans(files, Path("/tmp/Library"), classifier=None, tmdb_client=None, library_hint="tv", collision="skip")
+
+        self.assertEqual(plans[0].status, "skipped")
+        self.assertEqual(plans[1].status, "skipped")
+
+    def test_type_tv_single_unparsed_numeric_filename_does_not_default(self):
+        source = Path("/tmp/Library/01.mkv")
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess.unknown("GuessIt did not find title, season, and episode."),
+        ):
+            plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None, library_hint="tv")
+
+        self.assertEqual(plan.status, "skipped")
+
     def test_root_tv_episode_moves_into_show_folder(self):
         source = Path("/tmp/Library/Treme.1x03.Right.Place.Wrong.Time.mkv")
 
