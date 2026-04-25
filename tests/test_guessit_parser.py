@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ai_plex_renamer.guessit_parser import media_guess_from_guessit
-from ai_plex_renamer.models import MediaGuess
+from ai_plex_renamer.models import MediaGuess, RenamePlan
 from ai_plex_renamer.renamer import apply_plan, build_plans, make_rename_plan
 
 
@@ -258,6 +258,76 @@ class RenamePriorityTests(unittest.TestCase):
 
             self.assertEqual(applied.status, "renamed")
             self.assertTrue((root / "Treme" / "Treme - S01E03 - Right Place Wrong Time.mkv").exists())
+
+    def test_apply_plan_reports_missing_source_with_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "missing.mkv"
+            target = root / "target.mkv"
+            plan = RenamePlan(
+                source=source,
+                target=target,
+                guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                status="planned",
+            )
+
+            applied = apply_plan(plan, retry_delays=())
+
+            self.assertEqual(applied.status, "error")
+            self.assertIn("Source file was not found at apply time.", applied.message)
+            self.assertIn("source_exists=False", applied.message)
+            self.assertIn("target_parent_exists=True", applied.message)
+
+    def test_apply_plan_retries_transient_missing_source_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Show.1x01.mkv"
+            target = root / "Show - S01E01.mkv"
+            source.touch()
+            plan = RenamePlan(
+                source=source,
+                target=target,
+                guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                status="planned",
+            )
+            calls = []
+            real_rename = Path.rename
+
+            def flaky_rename(self, destination):
+                if self == source and not calls:
+                    calls.append("failed")
+                    raise FileNotFoundError(2, "simulated transient missing source", str(self))
+                return real_rename(self, destination)
+
+            with patch("pathlib.Path.rename", flaky_rename):
+                applied = apply_plan(plan, retry_delays=(0,))
+
+            self.assertEqual(applied.status, "renamed")
+            self.assertTrue(target.exists())
+
+    def test_apply_plan_uses_copy_fallback_when_rename_cannot_find_existing_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Show.1x01.mkv"
+            target = root / "Show - S01E01.mkv"
+            source.write_text("video", encoding="utf-8")
+            plan = RenamePlan(
+                source=source,
+                target=target,
+                guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                status="planned",
+            )
+
+            def failing_rename(self, destination):
+                raise FileNotFoundError(2, "simulated persistent missing source", str(self))
+
+            with patch("pathlib.Path.rename", failing_rename):
+                applied = apply_plan(plan, retry_delays=())
+
+            self.assertEqual(applied.status, "renamed")
+            self.assertEqual(applied.message, "Renamed successfully via copy fallback.")
+            self.assertFalse(source.exists())
+            self.assertEqual(target.read_text(encoding="utf-8"), "video")
 
     def test_sxxexx_language_suffix_does_not_search_as_title(self):
         source = Path("/tmp/Hentai2/聖痕のアリア/S01E01.chs.mp4")

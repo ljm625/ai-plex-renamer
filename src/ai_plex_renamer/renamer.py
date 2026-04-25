@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import re
+import shutil
+import time
 from typing import Iterable, Iterator, Optional
 
 from .ai import NvidiaAIClassifier
@@ -12,6 +14,9 @@ from .heuristics import clean_folder_title, guess_folder_episode_from_path, gues
 from .models import MediaGuess, RenamePlan
 from .naming import build_plex_filename, build_plex_folder_name, is_video_file, resolve_collision
 from .tmdb import TMDBClient
+
+
+APPLY_RETRY_DELAYS = (0.2, 0.5)
 
 
 def iter_media_files(root: Path, recursive: bool = True, include_hidden: bool = False) -> Iterator[Path]:
@@ -295,28 +300,150 @@ def _normalize_title_for_compare(value: str) -> str:
     return re.sub(r"[^\w]+", "", value.lower())
 
 
-def apply_plan(plan: RenamePlan) -> RenamePlan:
+def apply_plan(plan: RenamePlan, retry_delays: Iterable[float] = APPLY_RETRY_DELAYS) -> RenamePlan:
     if plan.status != "planned" or plan.target is None:
         return plan
+
+    source = _resolve_existing_source(plan.source)
+    if source is None:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=_rename_diagnostics("Source file was not found at apply time.", plan.source, plan.target),
+        )
+
     try:
         plan.target.parent.mkdir(parents=True, exist_ok=True)
-        plan.source.rename(plan.target)
     except OSError as exc:
         return RenamePlan(
             source=plan.source,
             target=plan.target,
             guess=plan.guess,
             status="error",
-            message=f"Rename failed: {exc}",
+            message=_rename_diagnostics("Could not create target folder.", source, plan.target, exc),
         )
-    else:
+
+    if plan.target.exists() and plan.target != source:
         return RenamePlan(
             source=plan.source,
             target=plan.target,
             guess=plan.guess,
-            status="renamed",
-            message="Renamed successfully.",
+            status="error",
+            message=_rename_diagnostics("Target file already exists at apply time.", source, plan.target),
         )
+
+    delays = tuple(retry_delays)
+    for attempt in range(len(delays) + 1):
+        try:
+            source.rename(plan.target)
+        except FileNotFoundError as exc:
+            refreshed_source = _resolve_existing_source(source)
+            if refreshed_source is not None:
+                source = refreshed_source
+            if attempt < len(delays):
+                time.sleep(delays[attempt])
+                continue
+            fallback_plan = _copy_move_fallback(plan, source)
+            if fallback_plan is not None:
+                return fallback_plan
+            return RenamePlan(
+                source=plan.source,
+                target=plan.target,
+                guess=plan.guess,
+                status="error",
+                message=_rename_diagnostics(
+                    "Rename failed because Windows could not find the source path.",
+                    source,
+                    plan.target,
+                    exc,
+                ),
+            )
+        except OSError as exc:
+            return RenamePlan(
+                source=plan.source,
+                target=plan.target,
+                guess=plan.guess,
+                status="error",
+                message=_rename_diagnostics("Rename failed.", source, plan.target, exc),
+            )
+        else:
+            return RenamePlan(
+                source=plan.source,
+                target=plan.target,
+                guess=plan.guess,
+                status="renamed",
+                message="Renamed successfully.",
+            )
+
+    return RenamePlan(
+        source=plan.source,
+        target=plan.target,
+        guess=plan.guess,
+        status="error",
+        message=_rename_diagnostics("Rename failed for an unknown reason.", source, plan.target),
+    )
+
+
+def _resolve_existing_source(source: Path) -> Optional[Path]:
+    if _exists(source):
+        return source
+    parent = source.parent
+    if not _exists(parent):
+        return None
+    try:
+        for candidate in parent.iterdir():
+            if candidate.name.casefold() == source.name.casefold() and candidate.is_file():
+                return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _copy_move_fallback(plan: RenamePlan, source: Path) -> Optional[RenamePlan]:
+    if plan.target is None:
+        return None
+    if _exists(source) is not True or _exists(plan.target) is True:
+        return None
+    try:
+        shutil.move(str(source), str(plan.target))
+    except OSError as exc:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=_rename_diagnostics("Rename failed and copy fallback failed.", source, plan.target, exc),
+        )
+    return RenamePlan(
+        source=plan.source,
+        target=plan.target,
+        guess=plan.guess,
+        status="renamed",
+        message="Renamed successfully via copy fallback.",
+    )
+
+
+def _rename_diagnostics(message: str, source: Path, target: Path, exc: Optional[BaseException] = None) -> str:
+    parts = [message]
+    if exc is not None:
+        parts.append(str(exc))
+    parts.extend(
+        [
+            f"source_exists={_exists(source)}",
+            f"target_parent_exists={_exists(target.parent)}",
+            f"target_exists={_exists(target)}",
+        ]
+    )
+    return " ".join(parts)
+
+
+def _exists(path: Path) -> bool | str:
+    try:
+        return path.exists()
+    except OSError as exc:
+        return f"error:{exc}"
 
 
 def _is_hidden(path: Path) -> bool:
