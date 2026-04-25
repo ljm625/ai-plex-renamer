@@ -129,3 +129,23 @@ Movie Name (2024).mkv
 ```
 
 无法可靠判断的文件会被跳过，不会强行改成错误名字。
+
+## Release
+
+推送 `v*` tag 会触发 GitHub Actions 自动构建并发布各平台 PyInstaller 包：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Release 会包含：
+
+```text
+ai-plex-renamer-linux-x86_64.tar.gz
+ai-plex-renamer-windows-x86_64.zip
+ai-plex-renamer-macos-x86_64.tar.gz
+ai-plex-renamer-macos-arm64.tar.gz
+```
+
+也可以在 GitHub Actions 页面手动运行 `Release` workflow 生成构建 artifacts；只有 tag 触发时才会创建 GitHub Release。
