@@ -362,7 +362,8 @@ class RenamePriorityTests(unittest.TestCase):
             target = root / "Show - S01E01.mkv"
             source.write_text("video", encoding="utf-8")
             (root / "Show.1x01.ass").write_text("ass", encoding="utf-8")
-            (root / "Show.1x01.chs.ass").write_text("chs", encoding="utf-8")
+            (root / "Show.1x01.SC.ass").write_text("sc", encoding="utf-8")
+            (root / "Show.1x01.TC.ass").write_text("tc", encoding="utf-8")
             (root / "Show.1x01.chi.srt").write_text("chi", encoding="utf-8")
             unrelated = root / "Other.ass"
             unrelated.write_text("other", encoding="utf-8")
@@ -378,10 +379,11 @@ class RenamePriorityTests(unittest.TestCase):
             self.assertEqual(applied.status, "renamed")
             self.assertFalse((root / "Show.1x01.ass").exists())
             self.assertEqual((root / "Show - S01E01.ass").read_text(encoding="utf-8"), "ass")
-            self.assertEqual((root / "Show - S01E01.chs.ass").read_text(encoding="utf-8"), "chs")
+            self.assertEqual((root / "Show - S01E01.zh-Hans.ass").read_text(encoding="utf-8"), "sc")
+            self.assertEqual((root / "Show - S01E01.zh-Hant.ass").read_text(encoding="utf-8"), "tc")
             self.assertEqual((root / "Show - S01E01.chi.srt").read_text(encoding="utf-8"), "chi")
             self.assertTrue(unrelated.exists())
-            self.assertIn("Moved 3 sidecar", applied.message)
+            self.assertIn("Moved 4 sidecar", applied.message)
 
     def test_sxxexx_language_suffix_does_not_search_as_title(self):
         source = Path("/tmp/Hentai2/聖痕のアリア/S01E01.chs.mp4")

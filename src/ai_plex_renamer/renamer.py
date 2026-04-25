@@ -25,6 +25,16 @@ from .tmdb import TMDBClient
 
 APPLY_RETRY_DELAYS = (0.2, 0.5)
 SIDECAR_EXTENSIONS = {".ass", ".idx", ".smi", ".srt", ".ssa", ".sub", ".sup", ".vtt"}
+SIDECAR_LANGUAGE_ALIASES = {
+    "sc": "zh-Hans",
+    "chs": "zh-Hans",
+    "zh-cn": "zh-Hans",
+    "zh-hans": "zh-Hans",
+    "tc": "zh-Hant",
+    "cht": "zh-Hant",
+    "zh-tw": "zh-Hant",
+    "zh-hant": "zh-Hant",
+}
 
 
 def iter_media_files(root: Path, recursive: bool = True, include_hidden: bool = False) -> Iterator[Path]:
@@ -482,7 +492,7 @@ def _find_sidecar_moves(source: Path, target: Path) -> list[tuple[Path, Path]]:
         if not _is_sidecar_for_source(candidate, prefix):
             continue
         suffix = candidate.name[len(source.stem):]
-        moves.append((candidate, target.with_name(f"{target.stem}{suffix}")))
+        moves.append((candidate, target.with_name(f"{target.stem}{_normalize_sidecar_suffix(suffix)}")))
     return moves
 
 
@@ -490,6 +500,18 @@ def _is_sidecar_for_source(candidate: Path, prefix: str) -> bool:
     if candidate.suffix.lower() not in SIDECAR_EXTENSIONS:
         return False
     return candidate.name.casefold().startswith(prefix.casefold())
+
+
+def _normalize_sidecar_suffix(suffix: str) -> str:
+    parts = suffix.split(".")
+    if len(parts) < 3 or parts[0] != "":
+        return suffix
+
+    language = parts[1].lower()
+    normalized_language = SIDECAR_LANGUAGE_ALIASES.get(language)
+    if normalized_language is None:
+        return suffix
+    return "." + ".".join([normalized_language, *parts[2:]])
 
 
 def _first_existing_target(moves: Iterable[tuple[Path, Path]]) -> Optional[tuple[Path, Path]]:
