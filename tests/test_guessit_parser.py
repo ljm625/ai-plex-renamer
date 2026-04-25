@@ -154,6 +154,17 @@ class RenamePriorityTests(unittest.TestCase):
         self.assertEqual(plans[0].target.name, "Overflow - S01E01.mp4")
         self.assertEqual(plans[1].target.name, "Overflow - S01E02.mp4")
 
+    def test_title_dash_number_files_are_episode_planned_without_ai(self):
+        files = [
+            Path("/tmp/Hentai2/Overflow/Overflow - 01 (0ED62047).mkv"),
+            Path("/tmp/Hentai2/Overflow/Overflow - 02 (7841C3C7).mkv"),
+        ]
+
+        plans = build_plans(files, Path("/tmp/Hentai2"), classifier=None, tmdb_client=None, library_hint="auto", collision="skip")
+
+        self.assertEqual(plans[0].target.name, "Overflow - S01E01.mkv")
+        self.assertEqual(plans[1].target.name, "Overflow - S01E02.mkv")
+
     def test_root_tv_episode_moves_into_show_folder(self):
         source = Path("/tmp/Library/Treme.1x03.Right.Place.Wrong.Time.mkv")
 

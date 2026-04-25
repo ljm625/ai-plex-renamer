@@ -43,6 +43,7 @@ FOLDER_EPISODE_PATTERNS = [
 HASH_EPISODE_PATTERN = re.compile(r"(?i)(?:[#＃]\s*|(?:episode|ep)\s*\.?\s*)(?P<episode>\d{1,3})")
 BRACKET_EPISODE_PATTERN = re.compile(r"(?i)[\[【(]\s*(?P<episode>\d{1,3})\s*[\]】)]")
 NUMBERED_EPISODE_PATTERN = re.compile(r"(?i)(?:第\s*)?(?P<episode>\d{1,3})\s*(?:話|话|集|回)")
+EPISODE_AFTER_TITLE_TEMPLATE = r"(?i)^{title}(?:\s*[-_.]\s*|\s+)(?:episode|ep|e)?\s*(?P<episode>\d{{1,3}})(?=$|[\s._\-\(\[\{{])"
 FOLDER_TITLE_PREFIX_PATTERN = re.compile(r"(?i)^(?:ova|oav|oad|tv|series|movie)\s+")
 LANGUAGE_TAGS = {
     "big5",
@@ -165,6 +166,8 @@ def _guess_folder_episode(stem: str, parent: str) -> MediaGuess:
     episode = _episode_number_from_marker(stem)
     if episode is None:
         episode = _episode_number_from_marker(cleaned_stem)
+    if episode is None:
+        episode = _episode_number_after_folder_title(cleaned_stem, title)
     episode_title = None
     if episode is None:
         for pattern, candidate_episode, candidate_title in FOLDER_EPISODE_PATTERNS:
@@ -204,6 +207,16 @@ def _episode_number_from_marker(value: str) -> Optional[int]:
         if episode is not None:
             return episode
     return None
+
+
+def _episode_number_after_folder_title(value: str, title: str) -> Optional[int]:
+    if not value or not title:
+        return None
+    pattern = re.compile(EPISODE_AFTER_TITLE_TEMPLATE.format(title=re.escape(title)))
+    match = pattern.search(value)
+    if not match:
+        return None
+    return _to_int(match.group("episode"))
 
 
 def _guess_movie(stem: str, parent: str) -> MediaGuess:

@@ -19,15 +19,12 @@ jobs:
         include:
           - os: ubuntu-latest
             asset_name: ai-plex-renamer-linux-x86_64
-            archive: tar.gz
             binary: ai-plex-renamer
           - os: windows-latest
             asset_name: ai-plex-renamer-windows-x86_64
-            archive: zip
             binary: ai-plex-renamer.exe
           - os: macos-14
             asset_name: ai-plex-renamer-macos-arm64
-            archive: tar.gz
             binary: ai-plex-renamer
 
     steps:
@@ -77,26 +74,11 @@ jobs:
           cp "dist/${{ matrix.binary }}" "package/${{ matrix.asset_name }}/"
           cp README.md "package/${{ matrix.asset_name }}/"
 
-      - name: Create tar.gz archive
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -czf "${{ matrix.asset_name }}.tar.gz" -C package "${{ matrix.asset_name }}"
-
-      - name: Create zip archive
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: Compress-Archive -Path "package/${{ matrix.asset_name }}" -DestinationPath "${{ matrix.asset_name }}.zip"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: |
-            ${{ matrix.asset_name }}.tar.gz
-            ${{ matrix.asset_name }}.zip
-          if-no-files-found: ignore
+          path: package/${{ matrix.asset_name }}
 
   release:
     name: Publish GitHub Release
@@ -107,8 +89,26 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release-assets
-          merge-multiple: true
+          path: release-packages
+
+      - name: Create release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for package_dir in release-packages/*; do
+            [ -d "$package_dir" ] || continue
+            asset_name="$(basename "$package_dir")"
+            if [[ "$asset_name" == *windows* ]]; then
+              (
+                cd release-packages
+                python3 -m zipfile -c "../release-assets/${asset_name}.zip" "$asset_name"
+              )
+            else
+              tar -czf "release-assets/${asset_name}.tar.gz" -C release-packages "$asset_name"
+            fi
+          done
+          ls -la release-assets
 
       - name: Create release
         uses: softprops/action-gh-release@v2
