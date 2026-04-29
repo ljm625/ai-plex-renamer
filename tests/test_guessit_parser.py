@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from ai_plex_renamer.guessit_parser import media_guess_from_guessit
 from ai_plex_renamer.models import MediaGuess, RenamePlan
-from ai_plex_renamer.renamer import apply_plan, build_plans, make_rename_plan
+from ai_plex_renamer.renamer import apply_plan, build_plans, make_rename_plan, validate_apply_plans
 
 
 class GuessItParserTests(unittest.TestCase):
@@ -322,6 +322,25 @@ class RenamePriorityTests(unittest.TestCase):
 
         self.assertEqual(plan.target, Path("/tmp/Library/Treme/Treme - S01E03 - Right Place Wrong Time.mkv"))
 
+    def test_root_tv_episode_with_matching_filename_still_moves_into_show_folder(self):
+        source = Path("/tmp/Library/Treme - S01E03.mkv")
+
+        with patch(
+            "ai_plex_renamer.renamer.guess_with_guessit",
+            return_value=MediaGuess(
+                media_type="tv",
+                title="Treme",
+                season=1,
+                episode=3,
+                confidence=0.85,
+                reason="Parsed by GuessIt.",
+            ),
+        ):
+            plan = make_rename_plan(source, Path("/tmp/Library"), classifier=None)
+
+        self.assertEqual(plan.status, "planned")
+        self.assertEqual(plan.target, Path("/tmp/Library/Treme/Treme - S01E03.mkv"))
+
     def test_show_directory_tv_episode_does_not_nest_show_folder(self):
         source = Path("/tmp/Library/Treme/Treme.1x03.Right.Place.Wrong.Time.mkv")
 
@@ -484,6 +503,98 @@ class RenamePriorityTests(unittest.TestCase):
             self.assertEqual((root / "Show - S01E01.chi.srt").read_text(encoding="utf-8"), "chi")
             self.assertTrue(unrelated.exists())
             self.assertIn("Moved 4 sidecar", applied.message)
+
+    def test_apply_plan_rolls_back_video_when_sidecar_move_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Show.1x01.mkv"
+            sidecar = root / "Show.1x01.ass"
+            target = root / "Show - S01E01.mkv"
+            source.write_text("video", encoding="utf-8")
+            sidecar.write_text("ass", encoding="utf-8")
+            plan = RenamePlan(
+                source=source,
+                target=target,
+                guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                status="planned",
+            )
+            real_rename = Path.rename
+
+            def failing_sidecar_rename(self, destination):
+                if self == sidecar:
+                    raise OSError("simulated sidecar move failure")
+                return real_rename(self, destination)
+
+            with patch("pathlib.Path.rename", failing_sidecar_rename):
+                applied = apply_plan(plan, retry_delays=())
+
+            self.assertEqual(applied.status, "error")
+            self.assertIn("Rolled back moved file", applied.message)
+            self.assertTrue(source.exists())
+            self.assertTrue(sidecar.exists())
+            self.assertFalse(target.exists())
+
+    def test_validate_apply_plans_reports_duplicate_targets_before_renaming(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "first.mkv"
+            second = root / "second.mkv"
+            target = root / "Show - S01E01.mkv"
+            first.touch()
+            second.touch()
+            guess = MediaGuess(media_type="tv", title="Show", season=1, episode=1)
+            plans = [
+                RenamePlan(source=first, target=target, guess=guess, status="planned"),
+                RenamePlan(source=second, target=target, guess=guess, status="planned"),
+            ]
+
+            problems = validate_apply_plans(plans)
+
+            self.assertEqual(len(problems), 1)
+            self.assertIn("Duplicate target planned", problems[0])
+
+    def test_apply_plan_blocks_duplicate_normalized_sidecar_targets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Show.1x01.mkv"
+            target = root / "Show" / "Show - S01E01.mkv"
+            source.write_text("video", encoding="utf-8")
+            (root / "Show.1x01.SC.ass").write_text("sc", encoding="utf-8")
+            (root / "Show.1x01.chs.ass").write_text("chs", encoding="utf-8")
+            plan = RenamePlan(
+                source=source,
+                target=target,
+                guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                status="planned",
+            )
+
+            applied = apply_plan(plan, retry_delays=())
+
+            self.assertEqual(applied.status, "error")
+            self.assertIn("same target filename", applied.message)
+            self.assertTrue(source.exists())
+            self.assertFalse(target.exists())
+            self.assertFalse(target.parent.exists())
+
+    def test_validate_apply_plans_reports_duplicate_normalized_sidecar_targets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Show.1x01.mkv"
+            target = root / "Show - S01E01.mkv"
+            source.touch()
+            (root / "Show.1x01.SC.ass").touch()
+            (root / "Show.1x01.chs.ass").touch()
+            plan = RenamePlan(
+                source=source,
+                target=target,
+                guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                status="planned",
+            )
+
+            problems = validate_apply_plans([plan])
+
+            self.assertEqual(len(problems), 1)
+            self.assertIn("Duplicate target planned", problems[0])
 
     def test_sxxexx_language_suffix_does_not_search_as_title(self):
         source = Path("/tmp/Hentai2/聖痕のアリア/S01E01.chs.mp4")

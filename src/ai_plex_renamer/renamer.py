@@ -112,7 +112,7 @@ def _plan_from_guess(
             message=str(exc),
         )
 
-    if target.name == source.name:
+    if target == source:
         return RenamePlan(
             source=source,
             target=target,
@@ -122,6 +122,26 @@ def _plan_from_guess(
         )
 
     return RenamePlan(source=source, target=target, guess=guess, status="planned")
+
+
+def validate_apply_plans(plans: Iterable[RenamePlan]) -> list[str]:
+    problems: list[str] = []
+    planned_targets: dict[Path, Path] = {}
+
+    for plan in plans:
+        if plan.status != "planned" or plan.target is None:
+            continue
+
+        source = _resolve_existing_source(plan.source)
+        if source is None:
+            problems.append(_rename_diagnostics("Source file was not found during apply preflight.", plan.source, plan.target))
+            continue
+
+        _validate_move_target(source, plan.target, planned_targets, problems)
+        for sidecar_source, sidecar_target in _find_sidecar_moves(source, plan.target):
+            _validate_move_target(sidecar_source, sidecar_target, planned_targets, problems)
+
+    return problems
 
 
 def _local_guess(source: Path, library_hint: str) -> MediaGuess:
@@ -467,17 +487,6 @@ def apply_plan(plan: RenamePlan, retry_delays: Iterable[float] = APPLY_RETRY_DEL
             message=_rename_diagnostics("Source file was not found at apply time.", plan.source, plan.target),
         )
 
-    try:
-        plan.target.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        return RenamePlan(
-            source=plan.source,
-            target=plan.target,
-            guess=plan.guess,
-            status="error",
-            message=_rename_diagnostics("Could not create target folder.", source, plan.target, exc),
-        )
-
     if plan.target.exists() and plan.target != source:
         return RenamePlan(
             source=plan.source,
@@ -502,7 +511,32 @@ def apply_plan(plan: RenamePlan, retry_delays: Iterable[float] = APPLY_RETRY_DEL
                 sidecar_conflict[1],
             ),
         )
+    sidecar_duplicate = _first_duplicate_target(sidecar_moves)
+    if sidecar_duplicate is not None:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=_rename_diagnostics(
+                "Multiple sidecar files would use the same target filename.",
+                sidecar_duplicate[0],
+                sidecar_duplicate[2],
+            ),
+        )
 
+    try:
+        plan.target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=_rename_diagnostics("Could not create target folder.", source, plan.target, exc),
+        )
+
+    moved_paths: list[tuple[Path, Path]] = []
     move_error, used_fallback = _move_path_with_retry(source, plan.target, delays)
     if move_error is not None:
         return RenamePlan(
@@ -512,18 +546,26 @@ def apply_plan(plan: RenamePlan, retry_delays: Iterable[float] = APPLY_RETRY_DEL
             status="error",
             message=move_error,
         )
+    moved_paths.append((plan.target, source))
 
     moved_sidecars = 0
     for sidecar_source, sidecar_target in sidecar_moves:
         sidecar_error, _ = _move_path_with_retry(sidecar_source, sidecar_target, delays)
         if sidecar_error is not None:
+            rollback_error = _rollback_moved_paths(moved_paths)
+            message = f"Sidecar move failed: {sidecar_error}"
+            if rollback_error is None:
+                message = f"{message} Rolled back moved file(s)."
+            else:
+                message = f"{message} Rollback failed: {rollback_error}"
             return RenamePlan(
                 source=plan.source,
                 target=plan.target,
                 guess=plan.guess,
                 status="error",
-                message=f"Renamed video, but sidecar move failed: {sidecar_error}",
+                message=message,
             )
+        moved_paths.append((sidecar_target, sidecar_source))
         moved_sidecars += 1
 
     message = "Renamed successfully via copy fallback." if used_fallback else "Renamed successfully."
@@ -536,6 +578,21 @@ def apply_plan(plan: RenamePlan, retry_delays: Iterable[float] = APPLY_RETRY_DEL
         status="renamed",
         message=message,
     )
+
+
+def _rollback_moved_paths(moved_paths: Iterable[tuple[Path, Path]]) -> Optional[str]:
+    errors: list[str] = []
+    for current, original in reversed(tuple(moved_paths)):
+        if _exists(current) is not True:
+            errors.append(f"rollback_source_missing={current}")
+            continue
+        if _exists(original) is True:
+            errors.append(f"rollback_target_exists={original}")
+            continue
+        error, _ = _move_path_with_retry(current, original, ())
+        if error is not None:
+            errors.append(error)
+    return "; ".join(errors) if errors else None
 
 
 def _resolve_existing_source(source: Path) -> Optional[Path]:
@@ -634,6 +691,35 @@ def _first_existing_target(moves: Iterable[tuple[Path, Path]]) -> Optional[tuple
         if _exists(target) is True and target != source:
             return source, target
     return None
+
+
+def _first_duplicate_target(moves: Iterable[tuple[Path, Path]]) -> Optional[tuple[Path, Path, Path]]:
+    seen: dict[Path, Path] = {}
+    for source, target in moves:
+        previous_source = seen.get(target)
+        if previous_source is not None:
+            return previous_source, source, target
+        seen[target] = source
+    return None
+
+
+def _validate_move_target(
+    source: Path,
+    target: Path,
+    planned_targets: dict[Path, Path],
+    problems: list[str],
+) -> None:
+    previous_source = planned_targets.get(target)
+    if previous_source is not None:
+        problems.append(f"Duplicate target planned: {target} from {previous_source} and {source}")
+        return
+    planned_targets[target] = source
+
+    if _exists(target.parent) is True and not target.parent.is_dir():
+        problems.append(_rename_diagnostics("Target parent exists but is not a folder during apply preflight.", source, target))
+
+    if _exists(target) is True and target != source:
+        problems.append(_rename_diagnostics("Target file already exists during apply preflight.", source, target))
 
 
 def _rename_diagnostics(message: str, source: Path, target: Path, exc: Optional[BaseException] = None) -> str:

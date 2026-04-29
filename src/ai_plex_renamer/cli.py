@@ -8,7 +8,7 @@ from typing import Iterable, Optional
 from .ai import NVIDIA_DEFAULT_BASE_URL, NVIDIA_DEFAULT_MODEL, NvidiaAIClassifier
 from .debug import stderr_logger
 from .models import RenamePlan
-from .renamer import apply_plan, build_plans, iter_media_files
+from .renamer import apply_plan, build_plans, iter_media_files, validate_apply_plans
 from .tmdb import TMDBClient
 
 
@@ -70,6 +70,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     final_plans: list[RenamePlan] = []
+    if args.apply:
+        preflight_errors = validate_apply_plans(plans)
+        if preflight_errors:
+            if args.json:
+                print(json.dumps({"status": "error", "errors": preflight_errors}, ensure_ascii=False, indent=2))
+            else:
+                print("Apply preflight failed. No files were renamed.")
+                for error in preflight_errors:
+                    print(f"  ERROR: {error}")
+            return 1
+
     for index, plan in enumerate(plans, start=1):
         if not args.json:
             print(f"[{index}/{len(plans)}] {plan.source}")
@@ -78,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         final_plans.append(plan)
         if not args.json:
             print(format_plan(plan, apply=args.apply))
+        if args.apply and plan.status == "error":
+            remaining = len(plans) - index
+            if remaining and not args.json:
+                print(f"Stopped after first apply error. {remaining} plan(s) were not attempted.")
+            break
 
     if args.json:
         print(json.dumps([plan.to_dict() for plan in final_plans], ensure_ascii=False, indent=2))
