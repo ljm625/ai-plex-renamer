@@ -16,7 +16,7 @@ from .models import MediaGuess
 
 JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 NVIDIA_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_DEFAULT_MODEL = "meta/llama-3.1-8b-instruct"
+NVIDIA_DEFAULT_MODEL = "deepseek-ai/deepseek-v4-flash"
 
 AITransport = Callable[[str, Mapping[str, str], Mapping[str, Any], int], Mapping[str, Any]]
 
