@@ -8,7 +8,7 @@ from typing import Iterable, Optional
 from .ai import NVIDIA_DEFAULT_BASE_URL, NVIDIA_DEFAULT_MODEL, NvidiaAIClassifier
 from .debug import stderr_logger
 from .models import RenamePlan
-from .renamer import apply_plan, build_plans, iter_media_files, validate_apply_plans
+from .renamer import apply_plans_by_group, build_plans, iter_media_files
 from .tmdb import TMDBClient
 
 
@@ -58,9 +58,10 @@ def main(argv: list[str] | None = None) -> int:
         print("No video files found.")
         return 0
 
+    scan_root = root if root.is_dir() else root.parent
     plans = build_plans(
         files,
-        root=root if root.is_dir() else root.parent,
+        root=scan_root,
         classifier=classifier,
         tmdb_client=tmdb_client,
         library_hint=args.type,
@@ -69,31 +70,16 @@ def main(argv: list[str] | None = None) -> int:
         debug=debug,
     )
 
-    final_plans: list[RenamePlan] = []
     if args.apply:
-        preflight_errors = validate_apply_plans(plans)
-        if preflight_errors:
-            if args.json:
-                print(json.dumps({"status": "error", "errors": preflight_errors}, ensure_ascii=False, indent=2))
-            else:
-                print("Apply preflight failed. No files were renamed.")
-                for error in preflight_errors:
-                    print(f"  ERROR: {error}")
-            return 1
+        final_plans = apply_plans_by_group(plans, root=scan_root, failed_dir_name=args.failed_dir)
+    else:
+        final_plans = plans
 
-    for index, plan in enumerate(plans, start=1):
+    for index, plan in enumerate(final_plans, start=1):
         if not args.json:
-            print(f"[{index}/{len(plans)}] {plan.source}")
-        if args.apply:
-            plan = apply_plan(plan)
-        final_plans.append(plan)
+            print(f"[{index}/{len(final_plans)}] {plan.source}")
         if not args.json:
             print(format_plan(plan, apply=args.apply))
-        if args.apply and plan.status == "error":
-            remaining = len(plans) - index
-            if remaining and not args.json:
-                print(f"Stopped after first apply error. {remaining} plan(s) were not attempted.")
-            break
 
     if args.json:
         print(json.dumps([plan.to_dict() for plan in final_plans], ensure_ascii=False, indent=2))
@@ -230,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="What to do when the target filename already exists. Default: skip.",
     )
     parser.add_argument(
+        "--failed-dir",
+        default=".failed",
+        help="Folder used during --apply for duplicate/conflicting planned files. Relative paths are under the scan root. Default: .failed.",
+    )
+    parser.add_argument(
         "--organize-root-tv",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -295,6 +286,11 @@ def format_plan(plan: RenamePlan, apply: bool) -> str:
             f"  {verb}: {plan.source.name} -> {target_display}\n"
             f"  guess: {plan.guess.media_type}, confidence={plan.guess.confidence:.2f}, "
             f"reason={plan.guess.reason}"
+        )
+    if plan.status == "failed" and plan.target:
+        return (
+            f"  FAILED: {plan.source.name} -> {plan.target}\n"
+            f"  reason: {plan.message or plan.guess.reason}"
         )
     return (
         f"  {plan.status.upper()}: {plan.source.name}\n"

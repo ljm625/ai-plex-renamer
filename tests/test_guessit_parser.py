@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from ai_plex_renamer.guessit_parser import media_guess_from_guessit
 from ai_plex_renamer.models import MediaGuess, RenamePlan
-from ai_plex_renamer.renamer import apply_plan, build_plans, make_rename_plan, validate_apply_plans
+from ai_plex_renamer.renamer import apply_plan, apply_plans_by_group, build_plans, make_rename_plan, validate_apply_plans
 
 
 class GuessItParserTests(unittest.TestCase):
@@ -552,6 +552,113 @@ class RenamePriorityTests(unittest.TestCase):
 
             self.assertEqual(len(problems), 1)
             self.assertIn("Duplicate target planned", problems[0])
+
+    def test_apply_plans_by_group_moves_duplicate_target_loser_to_failed_with_sidecars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            parent = root / "Adam's Sweet Agony"
+            parent.mkdir()
+            first = parent / "[KyokuSai] Adam's Sweet Agony [03][720P].mp4"
+            second = parent / "[KyokuSai] Adam's Sweet Agony [03.5][720P].mp4"
+            target = parent / "Adam's Sweet Agony (2024) - S01E03 - I Stopped Hiding It.mp4"
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
+            sidecar = parent / "[KyokuSai] Adam's Sweet Agony [03.5][720P].SC.ass"
+            sidecar.write_text("subtitle", encoding="utf-8")
+            guess = MediaGuess(media_type="tv", title="Adam's Sweet Agony", year=2024, season=1, episode=3)
+            plans = [
+                RenamePlan(source=first, target=target, guess=guess, status="planned"),
+                RenamePlan(source=second, target=target, guess=guess, status="planned"),
+            ]
+
+            applied = apply_plans_by_group(plans, root, retry_delays=())
+
+            self.assertEqual(applied[0].status, "renamed")
+            self.assertEqual(applied[1].status, "failed")
+            self.assertTrue(target.exists())
+            self.assertEqual(target.read_text(encoding="utf-8"), "first")
+            failed_video = root / ".failed" / "Adam's Sweet Agony" / second.name
+            failed_sidecar = root / ".failed" / "Adam's Sweet Agony" / sidecar.name
+            self.assertTrue(failed_video.exists())
+            self.assertTrue(failed_sidecar.exists())
+            self.assertFalse(second.exists())
+            self.assertFalse(sidecar.exists())
+
+    def test_apply_plans_by_group_keeps_other_folders_running_after_group_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            broken_parent = root / "Broken"
+            good_parent = root / "Good"
+            broken_parent.mkdir()
+            good_parent.mkdir()
+            broken_source = broken_parent / "Show.1x01.mkv"
+            blocked_parent = broken_parent / "Blocked"
+            broken_target = blocked_parent / "Show - S01E01.mkv"
+            good_source = good_parent / "Good.1x01.mkv"
+            good_target = good_parent / "Good - S01E01.mkv"
+            broken_source.write_text("broken", encoding="utf-8")
+            blocked_parent.write_text("not a folder", encoding="utf-8")
+            good_source.write_text("good", encoding="utf-8")
+            plans = [
+                RenamePlan(
+                    source=broken_source,
+                    target=broken_target,
+                    guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                    status="planned",
+                ),
+                RenamePlan(
+                    source=good_source,
+                    target=good_target,
+                    guess=MediaGuess(media_type="tv", title="Good", season=1, episode=1),
+                    status="planned",
+                ),
+            ]
+
+            applied = apply_plans_by_group(plans, root, retry_delays=())
+
+            self.assertEqual(applied[0].status, "error")
+            self.assertEqual(applied[1].status, "renamed")
+            self.assertTrue(broken_source.exists())
+            self.assertTrue(blocked_parent.is_file())
+            self.assertTrue(good_target.exists())
+            self.assertFalse(good_source.exists())
+
+    def test_apply_plans_by_group_moves_existing_target_conflict_to_failed_and_continues(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            parent = root / "Show"
+            parent.mkdir()
+            source = parent / "Show.1x01.alt.mkv"
+            target = parent / "Show - S01E01.mkv"
+            next_source = parent / "Show.1x02.mkv"
+            next_target = parent / "Show - S01E02.mkv"
+            source.write_text("alternate", encoding="utf-8")
+            target.write_text("existing", encoding="utf-8")
+            next_source.write_text("next", encoding="utf-8")
+            plans = [
+                RenamePlan(
+                    source=source,
+                    target=target,
+                    guess=MediaGuess(media_type="tv", title="Show", season=1, episode=1),
+                    status="planned",
+                ),
+                RenamePlan(
+                    source=next_source,
+                    target=next_target,
+                    guess=MediaGuess(media_type="tv", title="Show", season=1, episode=2),
+                    status="planned",
+                ),
+            ]
+
+            applied = apply_plans_by_group(plans, root, retry_delays=())
+
+            self.assertEqual(applied[0].status, "failed")
+            self.assertEqual(applied[1].status, "renamed")
+            self.assertEqual(target.read_text(encoding="utf-8"), "existing")
+            self.assertTrue((root / ".failed" / "Show" / source.name).exists())
+            self.assertFalse(source.exists())
+            self.assertTrue(next_target.exists())
+            self.assertFalse(next_source.exists())
 
     def test_apply_plan_blocks_duplicate_normalized_sidecar_targets(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -126,7 +126,7 @@ def _plan_from_guess(
 
 def validate_apply_plans(plans: Iterable[RenamePlan]) -> list[str]:
     problems: list[str] = []
-    planned_targets: dict[Path, Path] = {}
+    planned_targets: dict[str, Path] = {}
 
     for plan in plans:
         if plan.status != "planned" or plan.target is None:
@@ -142,6 +142,233 @@ def validate_apply_plans(plans: Iterable[RenamePlan]) -> list[str]:
             _validate_move_target(sidecar_source, sidecar_target, planned_targets, problems)
 
     return problems
+
+
+def apply_plans_by_group(
+    plans: Iterable[RenamePlan],
+    root: Path,
+    failed_dir_name: str = ".failed",
+    retry_delays: Iterable[float] = APPLY_RETRY_DELAYS,
+) -> list[RenamePlan]:
+    delays = tuple(retry_delays)
+    groups: dict[Path, list[RenamePlan]] = {}
+    for plan in plans:
+        groups.setdefault(plan.source.parent, []).append(plan)
+
+    results: list[RenamePlan] = []
+    for group_plans in groups.values():
+        results.extend(_apply_plan_group(group_plans, root, failed_dir_name, delays))
+    return results
+
+
+def _apply_plan_group(
+    plans: list[RenamePlan],
+    root: Path,
+    failed_dir_name: str,
+    retry_delays: Iterable[float],
+) -> list[RenamePlan]:
+    duplicate_plans = _duplicate_target_loser_plans(plans)
+    duplicate_ids = {id(plan) for plan in duplicate_plans}
+    outcomes: dict[int, RenamePlan] = {}
+
+    for plan in duplicate_plans:
+        outcomes[id(plan)] = _move_plan_to_failed(plan, root, failed_dir_name, retry_delays, reason="Duplicate target")
+
+    kept_plans = [plan for plan in plans if id(plan) not in duplicate_ids]
+    existing_conflict_ids: set[int] = set()
+    for plan in kept_plans:
+        if _has_existing_target_conflict(plan):
+            outcomes[id(plan)] = _move_plan_to_failed(
+                plan,
+                root,
+                failed_dir_name,
+                retry_delays,
+                reason="Target already exists",
+            )
+            existing_conflict_ids.add(id(plan))
+
+    kept_plans = [plan for plan in kept_plans if id(plan) not in existing_conflict_ids]
+    preflight_errors = validate_apply_plans(kept_plans)
+    if preflight_errors:
+        message = "Apply preflight failed for this folder. No files in this folder were renamed. " + " ".join(preflight_errors)
+        for plan in kept_plans:
+            if plan.status == "planned":
+                outcomes[id(plan)] = RenamePlan(
+                    source=plan.source,
+                    target=plan.target,
+                    guess=plan.guess,
+                    status="error",
+                    message=message,
+                )
+
+    stop_group = False
+    for plan in kept_plans:
+        if id(plan) in outcomes:
+            continue
+        if stop_group and plan.status == "planned":
+            outcomes[id(plan)] = RenamePlan(
+                source=plan.source,
+                target=plan.target,
+                guess=plan.guess,
+                status="skipped",
+                message="Not attempted because a previous apply in this folder failed.",
+            )
+            continue
+        applied = apply_plan(plan, retry_delays=retry_delays)
+        outcomes[id(plan)] = applied
+        if applied.status == "error":
+            stop_group = True
+
+    return [outcomes.get(id(plan), plan) for plan in plans]
+
+
+def _duplicate_target_loser_plans(plans: Iterable[RenamePlan]) -> list[RenamePlan]:
+    seen: dict[str, RenamePlan] = {}
+    losers: list[RenamePlan] = []
+    for plan in plans:
+        if plan.status != "planned" or plan.target is None:
+            continue
+        key = _path_key(plan.target)
+        if key in seen:
+            losers.append(plan)
+            continue
+        seen[key] = plan
+    return losers
+
+
+def _move_plan_to_failed(
+    plan: RenamePlan,
+    root: Path,
+    failed_dir_name: str,
+    retry_delays: Iterable[float],
+    reason: str,
+) -> RenamePlan:
+    source = _resolve_existing_source(plan.source)
+    if source is None:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=_rename_diagnostics("Duplicate target source was not found.", plan.source, plan.target or plan.source),
+        )
+
+    planned_targets: dict[str, Path] = {}
+    try:
+        failed_target = _resolve_available_target(
+            _failed_target_for_source(source, root, failed_dir_name),
+            source,
+            planned_targets,
+        )
+        planned_targets[_path_key(failed_target)] = source
+        moves = [(source, failed_target)]
+        for sidecar_source in _find_sidecar_sources(source):
+            sidecar_target = _resolve_available_target(
+                failed_target.parent / sidecar_source.name,
+                sidecar_source,
+                planned_targets,
+            )
+            planned_targets[_path_key(sidecar_target)] = sidecar_source
+            moves.append((sidecar_source, sidecar_target))
+    except OSError as exc:
+        return RenamePlan(
+            source=plan.source,
+            target=plan.target,
+            guess=plan.guess,
+            status="error",
+            message=f"Could not plan duplicate target move to failed folder: {exc}",
+        )
+
+    move_error = _move_paths_with_rollback(moves, retry_delays)
+    if move_error is not None:
+        return RenamePlan(
+            source=plan.source,
+            target=failed_target,
+            guess=plan.guess,
+            status="error",
+            message=f"Could not move duplicate target source to failed folder: {move_error}",
+        )
+
+    moved_sidecars = len(moves) - 1
+    message = f"{reason}; moved original file to failed folder: {failed_target}"
+    if moved_sidecars:
+        message = f"{message} Moved {moved_sidecars} sidecar file(s)."
+    return RenamePlan(
+        source=plan.source,
+        target=failed_target,
+        guess=plan.guess,
+        status="failed",
+        message=message,
+    )
+
+
+def _has_existing_target_conflict(plan: RenamePlan) -> bool:
+    if plan.status != "planned" or plan.target is None:
+        return False
+    source = _resolve_existing_source(plan.source)
+    if source is None:
+        return False
+    if _exists(plan.target) is True and plan.target != source:
+        return True
+    for sidecar_source, sidecar_target in _find_sidecar_moves(source, plan.target):
+        if _exists(sidecar_target) is True and sidecar_target != sidecar_source:
+            return True
+    return False
+
+
+def _failed_target_for_source(source: Path, root: Path, failed_dir_name: str) -> Path:
+    failed_root = Path(failed_dir_name).expanduser()
+    if not failed_root.is_absolute():
+        failed_root = root / failed_root
+    try:
+        relative_source = source.relative_to(root)
+    except ValueError:
+        relative_source = Path(source.name)
+    return failed_root / relative_source
+
+
+def _resolve_available_target(base_target: Path, source: Path, planned_targets: dict[str, Path]) -> Path:
+    for index in range(10000):
+        if index == 0:
+            candidate = base_target
+        else:
+            candidate = base_target.with_name(f"{base_target.stem} ({index}){base_target.suffix}")
+        previous_source = planned_targets.get(_path_key(candidate))
+        if previous_source is not None and previous_source != source:
+            continue
+        if candidate == source or _exists(candidate) is False:
+            return candidate
+    raise FileExistsError(f"No available failed target for {source}")
+
+
+def _move_paths_with_rollback(moves: Iterable[tuple[Path, Path]], retry_delays: Iterable[float]) -> Optional[str]:
+    moved_paths: list[tuple[Path, Path]] = []
+    delays = tuple(retry_delays)
+    for source, target in moves:
+        if source == target:
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            rollback_error = _rollback_moved_paths(moved_paths)
+            message = _rename_diagnostics("Could not create target folder.", source, target, exc)
+            if rollback_error:
+                message = f"{message} Rollback failed: {rollback_error}"
+            return message
+        if _exists(target) is True:
+            rollback_error = _rollback_moved_paths(moved_paths)
+            message = _rename_diagnostics("Target file already exists.", source, target)
+            if rollback_error:
+                message = f"{message} Rollback failed: {rollback_error}"
+            return message
+        move_error, _ = _move_path_with_retry(source, target, delays)
+        if move_error is not None:
+            rollback_error = _rollback_moved_paths(moved_paths)
+            if rollback_error is None:
+                return f"{move_error} Rolled back moved file(s)."
+            return f"{move_error} Rollback failed: {rollback_error}"
+        moved_paths.append((target, source))
+    return None
 
 
 def _local_guess(source: Path, library_hint: str) -> MediaGuess:
@@ -649,23 +876,30 @@ def _copy_move_fallback(source: Path, target: Path) -> Optional[str]:
 
 
 def _find_sidecar_moves(source: Path, target: Path) -> list[tuple[Path, Path]]:
+    moves: list[tuple[Path, Path]] = []
+    for candidate in _find_sidecar_sources(source):
+        suffix = candidate.name[len(source.stem):]
+        moves.append((candidate, target.with_name(f"{target.stem}{_normalize_sidecar_suffix(suffix)}")))
+    return moves
+
+
+def _find_sidecar_sources(source: Path) -> list[Path]:
     parent = source.parent
     if not _exists(parent):
         return []
-    moves: list[tuple[Path, Path]] = []
     prefix = f"{source.stem}."
     try:
         candidates = sorted(parent.iterdir(), key=lambda path: path.name.casefold())
     except OSError:
         return []
+    sidecars: list[Path] = []
     for candidate in candidates:
         if candidate == source or not candidate.is_file():
             continue
         if not _is_sidecar_for_source(candidate, prefix):
             continue
-        suffix = candidate.name[len(source.stem):]
-        moves.append((candidate, target.with_name(f"{target.stem}{_normalize_sidecar_suffix(suffix)}")))
-    return moves
+        sidecars.append(candidate)
+    return sidecars
 
 
 def _is_sidecar_for_source(candidate: Path, prefix: str) -> bool:
@@ -694,26 +928,28 @@ def _first_existing_target(moves: Iterable[tuple[Path, Path]]) -> Optional[tuple
 
 
 def _first_duplicate_target(moves: Iterable[tuple[Path, Path]]) -> Optional[tuple[Path, Path, Path]]:
-    seen: dict[Path, Path] = {}
+    seen: dict[str, Path] = {}
     for source, target in moves:
-        previous_source = seen.get(target)
+        key = _path_key(target)
+        previous_source = seen.get(key)
         if previous_source is not None:
             return previous_source, source, target
-        seen[target] = source
+        seen[key] = source
     return None
 
 
 def _validate_move_target(
     source: Path,
     target: Path,
-    planned_targets: dict[Path, Path],
+    planned_targets: dict[str, Path],
     problems: list[str],
 ) -> None:
-    previous_source = planned_targets.get(target)
+    key = _path_key(target)
+    previous_source = planned_targets.get(key)
     if previous_source is not None:
         problems.append(f"Duplicate target planned: {target} from {previous_source} and {source}")
         return
-    planned_targets[target] = source
+    planned_targets[key] = source
 
     if _exists(target.parent) is True and not target.parent.is_dir():
         problems.append(_rename_diagnostics("Target parent exists but is not a folder during apply preflight.", source, target))
@@ -734,6 +970,10 @@ def _rename_diagnostics(message: str, source: Path, target: Path, exc: Optional[
         ]
     )
     return " ".join(parts)
+
+
+def _path_key(path: Path) -> str:
+    return str(path).casefold()
 
 
 def _exists(path: Path) -> bool | str:

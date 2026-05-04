@@ -88,6 +88,12 @@ ai-plex-renamer "/path/to/media"
 ai-plex-renamer "/path/to/media" --apply
 ```
 
+`--apply` 会按源文件夹分组执行；某个文件夹失败不会阻止其它文件夹继续处理。如果同一组里多个文件计划改成同一个目标名，或目标文件已经存在，会保留已有/第一个目标，后续冲突文件以及同名字幕/sidecar 会移动到扫描根目录下的 `.failed`，并保留原目录结构。可以用 `--failed-dir` 修改隔离目录：
+
+```bash
+ai-plex-renamer "/path/to/media" --apply --failed-dir ".failed"
+```
+
 指定媒体库类型：
 
 ```bash
